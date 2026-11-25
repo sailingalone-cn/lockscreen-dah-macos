@@ -8,6 +8,8 @@
 	<string>Lockscreen Dah</string>
 	<key>CFBundleExecutable</key>
 	<string>LockscreenDah</string>
+	<key>CFBundleIconFile</key>
+	<string>Icon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.xavierloo.lockscreen-dah</string>
 	<key>CFBundleInfoDictionaryVersion</key>
