@@ -70,14 +70,29 @@ final class PresenceTrackerTests: XCTestCase {
     /// Presence-only mode has no identity to match. A head-down or turned-away
     /// owner produces an upper body but no face, so a body must be able to
     /// establish the chain — otherwise the screen dims while they sit there and
-    /// only the next dim pulse brings it back.
-    func testBodyEstablishesTheChainInPresenceOnlyMode() {
+    /// only the next dim pulse brings it back. Two consecutive frames are
+    /// required so one false detection cannot hold the screen awake.
+    func testTwoConsecutiveBodyFramesEstablishTheChainInPresenceOnlyMode() {
         var tracker = PresenceTracker(now: t0)
-        let seen = t0 + 3
 
-        XCTAssertTrue(tracker.observe(result(bodies: 1), now: seen, presenceOnly: true))
+        XCTAssertFalse(tracker.observe(result(bodies: 1), now: t0 + 1, presenceOnly: true))
+        XCTAssertFalse(tracker.chainActive)
+        XCTAssertEqual(tracker.lastOwnerSeen, t0)
+
+        XCTAssertTrue(tracker.observe(result(bodies: 1), now: t0 + 1.25, presenceOnly: true))
         XCTAssertTrue(tracker.chainActive)
-        XCTAssertEqual(tracker.lastOwnerSeen, seen)
+        XCTAssertEqual(tracker.lastOwnerSeen, t0 + 1.25)
+    }
+
+    func testAGapBetweenBodyFramesResetsTheEstablishmentStreak() {
+        var tracker = PresenceTracker(now: t0)
+
+        tracker.observe(result(bodies: 1), now: t0 + 1, presenceOnly: true)
+        tracker.observe(result(), now: t0 + 1.25, presenceOnly: true)
+        XCTAssertFalse(tracker.observe(result(bodies: 1), now: t0 + 1.5, presenceOnly: true))
+        XCTAssertFalse(tracker.chainActive)
+        XCTAssertTrue(tracker.observe(result(bodies: 1), now: t0 + 1.75, presenceOnly: true))
+        XCTAssertTrue(tracker.chainActive)
     }
 
     func testBodyCannotEstablishTheChainWithoutPresenceOnlyMode() {

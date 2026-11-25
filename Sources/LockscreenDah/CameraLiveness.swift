@@ -100,11 +100,20 @@ enum CameraLiveness {
             )
         }
 
+        // Until the first analysis result exists the session is still starting:
+        // frames can be sparse while the ISP/AGC settles, and a cold start was
+        // being read as a dead camera after one frame followed by a few quiet
+        // seconds (measured 19:27: one frame, a 3.0 s gap, no verdict yet →
+        // cameraUnavailable). Judge a frame gap against the startup allowance
+        // until analysis has answered at least once; the steady-state bar
+        // applies after that. Still bounded, so a session that delivers one
+        // frame and then dies is caught within the startup allowance.
+        let frameBar = lastResultAt == nil ? startupAllowance : staleAfter
         // Falls back to when streaming began rather than when it was requested,
         // so the device-open time is never counted as a frame gap.
         let frameGap = now - (lastFrameAt ?? streamingSince)
-        if frameGap > staleAfter {
-            return Reading(gap: frameGap, bar: staleAfter, stall: .frames)
+        if frameGap > frameBar {
+            return Reading(gap: frameGap, bar: frameBar, stall: .frames)
         }
 
         // Frames are fine. Is anything looking at them? First inference gets its

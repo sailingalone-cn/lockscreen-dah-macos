@@ -12,6 +12,10 @@ import Foundation
 struct PresenceTracker {
     private(set) var chainActive = false
     private var strangerStreak = 0
+    /// Consecutive body frames seen while the chain is inactive in presence-only
+    /// mode. One frame is one bad detection away from keeping the screen lit in
+    /// an empty room, so establishment needs two; maintenance still uses one.
+    private var bodyEstablishStreak = 0
     /// Monotonic instant presence was last confirmed — the anchor a grace
     /// deadline is computed from. Exposed so the coordinator can schedule a
     /// precise one-shot timer against it instead of polling.
@@ -46,6 +50,7 @@ struct PresenceTracker {
     mutating func reset(now: TimeInterval = Uptime.now) {
         chainActive = false
         strangerStreak = 0
+        bodyEstablishStreak = 0
         unconfirmedSince = nil
         lastOwnerSeen = now
     }
@@ -54,6 +59,7 @@ struct PresenceTracker {
     mutating func establish(now: TimeInterval = Uptime.now) {
         chainActive = true
         strangerStreak = 0
+        bodyEstablishStreak = 0
         unconfirmedSince = nil // identity just confirmed
         lastOwnerSeen = now
     }
@@ -89,9 +95,17 @@ struct PresenceTracker {
             return true
         }
         if presenceOnly, result.bodyCount > 0, !chainActive {
-            establish(now: now)
-            return true
+            // Two consecutive frames, not one: a single false upper-body
+            // detection must not keep the screen lit in an empty room. The
+            // second frame (an analysis interval later) is the confirmation.
+            bodyEstablishStreak += 1
+            if bodyEstablishStreak >= 2 {
+                establish(now: now)
+                return true
+            }
+            return false
         }
+        bodyEstablishStreak = 0
 
         // A clearly frontal stranger face for several consecutive frames ends
         // the chain even if they keep the seat warm.

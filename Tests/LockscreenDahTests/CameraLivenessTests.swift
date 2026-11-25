@@ -56,7 +56,13 @@ final class CameraLivenessTests: XCTestCase {
         let streaming = requestedAt + 8
         // Last frame 3.5 s ago — past the bar, not merely at it. The boundary
         // itself is pinned separately by testAGapExactlyAtTheBarIsNotStale.
-        let reading = read(now: streaming + 4, streamingSince: streaming, lastFrameAt: streaming + 0.5)
+        // A verdict exists, so this is the steady-state frame bar.
+        let reading = read(
+            now: streaming + 4,
+            streamingSince: streaming,
+            lastFrameAt: streaming + 0.5,
+            lastResultAt: streaming + 1
+        )
         XCTAssertTrue(reading.isStale)
         XCTAssertEqual(reading.gap, 3.5, accuracy: 0.001)
         XCTAssertEqual(reading.bar, staleAfter, "streaming must be judged against the frame-gap bar")
@@ -67,14 +73,38 @@ final class CameraLivenessTests: XCTestCase {
         XCTAssertFalse(read(now: streaming + 2, streamingSince: streaming, lastFrameAt: streaming + 1.5).isStale)
     }
 
+    /// A session that has not produced a verdict yet is still starting: a single
+    /// frame followed by a quiet stretch must not be read as a dead camera.
+    /// Measured 19:27: one frame, a 3.0 s gap, no result yet → cameraUnavailable.
+    func testAFrameGapBeforeTheFirstVerdictIsNotAFrameStall() {
+        let streaming = requestedAt + 5
+        let reading = read(now: streaming + 4, streamingSince: streaming, lastFrameAt: streaming + 0.5)
+        XCTAssertFalse(reading.isStale)
+        XCTAssertNotEqual(reading.stall, .frames)
+    }
+
+    /// Still bounded: one frame followed by a long silence is a dead camera.
+    func testAFrameGapBeyondTheStartupBarBeforeTheFirstVerdictIsStale() {
+        let streaming = requestedAt + 5
+        let reading = read(
+            now: streaming + startupAllowance + 1,
+            streamingSince: streaming,
+            lastFrameAt: streaming + 0.5
+        )
+        XCTAssertTrue(reading.isStale)
+        XCTAssertEqual(reading.stall, .frames)
+        XCTAssertEqual(reading.bar, startupAllowance)
+    }
+
     /// A session that has started but not yet delivered gets its gap measured
     /// from when streaming began — never from when it was *requested*, or the
     /// device-open time would be charged to the frame gap and the session would
     /// be torn down the moment it came up.
     func testStreamingWithNoFrameYetMeasuresFromWhenStreamingBegan() {
         let streaming = requestedAt + 10
-        XCTAssertFalse(read(now: streaming + 2, streamingSince: streaming).isStale)
-        XCTAssertTrue(read(now: streaming + 4, streamingSince: streaming).isStale)
+        XCTAssertFalse(read(now: streaming + 4, streamingSince: streaming).isStale,
+                       "inside the startup allowance while no verdict exists")
+        XCTAssertTrue(read(now: streaming + startupAllowance + 0.1, streamingSince: streaming).isStale)
     }
 
     /// The regression that made the loop inescapable: a stale `lastFrameAt` left
@@ -98,7 +128,12 @@ final class CameraLivenessTests: XCTestCase {
     /// exactly at the bar is not yet stale.
     func testAGapExactlyAtTheBarIsNotStale() {
         let streaming = requestedAt + 5
-        XCTAssertFalse(read(now: streaming + staleAfter, streamingSince: streaming, lastFrameAt: streaming).isStale)
+        XCTAssertFalse(read(
+            now: streaming + staleAfter,
+            streamingSince: streaming,
+            lastFrameAt: streaming,
+            lastResultAt: streaming + 0.5
+        ).isStale)
     }
 
     // MARK: - Analysis stalling while the camera looks healthy
