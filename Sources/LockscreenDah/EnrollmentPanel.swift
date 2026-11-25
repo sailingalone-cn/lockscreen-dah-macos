@@ -34,7 +34,7 @@ final class EnrollmentPanel: NSObject {
     func show(session: AVCaptureSession, totalSamples: Int) {
         dismiss()
         let panel = NSPanel.floating(
-            title: "Enroll Face",
+            title: "录入人脸",
             contentSize: NSSize(width: 480, height: 470)
         )
         panel.delegate = self // title-bar close = cancel everything
@@ -108,12 +108,12 @@ final class EnrollmentPanel: NSObject {
         stageBadge = stageText
         stageOverlayLayer = stageOverlay
 
-        let instruction = NSTextField(labelWithString: "Look straight at the camera")
+        let instruction = NSTextField(labelWithString: "请正对摄像头")
         instruction.font = .systemFont(ofSize: 19, weight: .semibold)
         instruction.alignment = .center
         instructionLabel = instruction
 
-        let status = NSTextField(labelWithString: "Get ready…")
+        let status = NSTextField(labelWithString: "准备中…")
         status.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         status.textColor = .secondaryLabelColor
         status.alignment = .center
@@ -131,13 +131,13 @@ final class EnrollmentPanel: NSObject {
         // Primary (accent, Return key) sits rightmost, the alternative action
         // to its left, Cancel leftmost — standard macOS ordering. The whole
         // row is centered by the outer stack.
-        let cancel = NSButton.rounded("Cancel", target: self, action: #selector(cancelTapped))
+        let cancel = NSButton.rounded("取消", target: self, action: #selector(cancelTapped))
         cancelButton = cancel
 
-        let secondary = NSButton.rounded("Recapture", target: self, action: #selector(secondaryTapped))
+        let secondary = NSButton.rounded("重新拍摄", target: self, action: #selector(secondaryTapped))
         secondaryButton = secondary
 
-        let primary = NSButton.rounded("Start", target: self, action: #selector(primaryTapped), isDefault: true)
+        let primary = NSButton.rounded("开始", target: self, action: #selector(primaryTapped), isDefault: true)
         primaryButton = primary
 
         let controls = NSStackView()
@@ -258,14 +258,14 @@ final class EnrollmentPanel: NSObject {
 
     /// Verification passed (text only — the caller sets the buttons).
     func showVerified(score: Float) {
-        setInstruction("Verified: it's you ✓")
-        statusLabel?.stringValue = String(format: "Match score %.2f against your new profile.", score)
+        setInstruction("验证通过 ✓")
+        statusLabel?.stringValue = String(format: "与新档案的匹配度 %.2f。", score)
         statusLabel?.textColor = .systemGreen
     }
 
     /// Enrollment/verification failed (text only — caller sets the buttons).
     func showVerifyFailure(_ message: String) {
-        setInstruction("Enrollment failed")
+        setInstruction("录入失败")
         statusLabel?.stringValue = message
         statusLabel?.textColor = .systemRed
     }

@@ -28,6 +28,15 @@ final class PresenceSupervisorTests: XCTestCase {
         )
     }
 
+    private func decide(
+        _ state: SupervisedState, _ conditions: SystemConditions, dimOnly: Bool
+    ) -> SupervisionDecision {
+        PresenceSupervisor.decide(
+            state: state, conditions: conditions, gracePeriod: grace,
+            staleAfter: staleAfter, dimOnly: dimOnly
+        )
+    }
+
     // MARK: - Shipped bug: stranded in .locked (v1.3.0 – v1.4.0)
 
     /// The unlock notification is best-effort. Dropping one used to leave the
@@ -117,6 +126,59 @@ final class PresenceSupervisorTests: XCTestCase {
         )
     }
 
+    // MARK: - Dim mode
+
+    /// Dim mode's whole contract is "camera keeps looking, screen comes back on
+    /// a face" — so a healthy pipeline must not be disturbed.
+    func testDimmedKeepsRunningWhileTheCameraDelivers() {
+        XCTAssertEqual(decide(.dimmed, conditions(sinceFrame: 0)), .doNothing)
+    }
+
+    /// A real lock outranks dim mode: park, and let resumeFromLocked re-decide
+    /// when the screen is usable again.
+    func testDimmedParksWhenTheSessionLocks() {
+        XCTAssertEqual(decide(.dimmed, conditions(sessionLocked: true)), .enterLocked)
+    }
+
+    /// Same for a display that genuinely slept underneath the overlay.
+    func testDimmedParksWhenTheDisplaySleeps() {
+        XCTAssertEqual(decide(.dimmed, conditions(displayAsleep: true)), .enterLocked)
+    }
+
+    /// Dim mode has no lock to fall back on, so a stalled camera goes to the
+    /// retry ladder rather than being left as a black screen with no watcher.
+    func testDimmedHandsOffWhenFramesStop() {
+        XCTAssertEqual(
+            decide(.dimmed, conditions(sinceFrame: staleAfter + 0.1)), .cameraStopped
+        )
+    }
+
+    /// The upstream rule locks when the display sleeps after absence was
+    /// proven. Dim mode must not: locking is exactly the password prompt the
+    /// user opted out of.
+    func testDimModeNeverLocksOnDisplaySleep() {
+        XCTAssertEqual(
+            decide(
+                .watching,
+                conditions(displayAsleep: true, sinceOwner: grace + 1),
+                dimOnly: true
+            ),
+            .enterLocked
+        )
+    }
+
+    /// ...but the upstream behaviour is untouched when dim mode is off.
+    func testLockModeStillLocksOnDisplaySleep() {
+        XCTAssertEqual(
+            decide(
+                .watching,
+                conditions(displayAsleep: true, sinceOwner: grace + 1),
+                dimOnly: false
+            ),
+            .lockNow
+        )
+    }
+
     // MARK: - States the supervisor must keep its hands off
 
     /// `.cameraUnavailable` owns its own retry ladder; restarting once a second
@@ -139,7 +201,7 @@ final class PresenceSupervisorTests: XCTestCase {
     /// every state has an answer for any conditions.
     func testEveryStateDecidesUnderEveryCombination() {
         let states: [SupervisedState] = [
-            .paused, .watching, .alerting, .locked, .enrolling, .cameraUnavailable,
+            .paused, .watching, .alerting, .locked, .enrolling, .cameraUnavailable, .dimmed,
         ]
         for state in states {
             for sessionLocked in [true, false] {

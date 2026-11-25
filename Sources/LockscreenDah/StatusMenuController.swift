@@ -54,6 +54,9 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
                 symbol = "faceid"
             }
         case .enrolling: symbol = "person.crop.circle.badge.plus"
+        // The overlay covers the menu bar anyway; the icon only matters in the
+        // instant before it is drawn.
+        case .dimmed: symbol = "moon.fill"
         }
         statusItem.button?.image = statusImage(named: symbol)
     }
@@ -76,7 +79,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         let needsReenrollment = isPaused && Settings.reenrollmentRequired
         if !needsReenrollment {
             let toggle = NSMenuItem(
-                title: isPaused ? "Start Monitoring" : "Pause Monitoring",
+                title: isPaused ? "开始监测" : "暂停监测",
                 action: #selector(toggleMonitoring),
                 keyEquivalent: ""
             )
@@ -92,18 +95,18 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         enroll.target = self
         if !coordinator.recognizer.hasModel {
             enroll.action = nil
-            enroll.title = "Face model missing (run scripts/fetch-model.sh)"
+            enroll.title = "缺少人脸模型（请先运行 scripts/fetch-model.sh）"
         } else if coordinator.recognizer.hasProfile {
             // Names the outcome when it's the only way back, so the single row
             // carries the meaning the removed toggle used to.
-            enroll.title = needsReenrollment ? "Re-Enroll My Face to Resume" : "Re-Enroll My Face"
+            enroll.title = needsReenrollment ? "重新录入人脸以恢复" : "重新录入人脸"
             enroll.image = NSImage(
                 systemSymbolName: "arrow.clockwise",
                 accessibilityDescription: nil
             )
         } else {
             enroll.attributedTitle = NSAttributedString(
-                string: "No Face Enrolled",
+                string: "未录入人脸",
                 attributes: [
                     .foregroundColor: NSColor.systemRed,
                     .font: NSFont.menuFont(ofSize: 0),
@@ -123,14 +126,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         let about = NSMenuItem(
-            title: "About Lockscreen Dah?",
+            title: "关于 Lockscreen Dah",
             action: #selector(showAbout),
             keyEquivalent: ""
         )
         about.target = self
         menu.addItem(about)
 
-        let quit = NSMenuItem(title: "Quit Lockscreen Dah?", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "退出 Lockscreen Dah", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
     }
@@ -138,38 +141,98 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     // MARK: - Settings submenu (stay-open option rows)
 
     private func settingsSubmenu() -> NSMenuItem {
-        let settings = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
-        let settingsMenu = NSMenu(title: "Settings")
+        let settings = NSMenuItem(title: "设置", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu(title: "设置")
         // View-backed items have no action, so auto-enablement would mark
         // them disabled and AppKit would render their views dimmed.
         settingsMenu.autoenablesItems = false
 
         settingsMenu.addItem(durationSubmenu(
-            title: "Start Countdown After",
+            title: "无人判定延迟",
             options: Settings.gracePeriodOptions,
             get: { Settings.gracePeriod },
             set: { [weak self] in
                 Settings.gracePeriod = $0
-                // The scheduled countdown deadline (if already watching) was
-                // computed from the old grace period — recompute it now
-                // rather than waiting for the next real presence observation.
+                // The scheduled deadline (if already watching) was computed from
+                // the old value — recompute it now rather than waiting for the
+                // next real presence observation.
                 self?.coordinator.gracePeriodSettingChanged()
             }
         ))
         settingsMenu.addItem(durationSubmenu(
-            title: "Countdown Duration",
+            title: "倒计时时长",
             options: Settings.countdownOptions,
             get: { Settings.countdownDuration },
             set: { Settings.countdownDuration = $0 },
-            rowLabel: { $0 == 0 ? "Never Countdown" : "\(Int($0)) seconds" },
-            valueLabel: { $0 == 0 ? "Never" : "\(Int($0))s" }
+            rowLabel: { $0 == 0 ? "永不倒计时" : "\(Int($0)) 秒" },
+            valueLabel: { $0 == 0 ? "永不" : "\(Int($0))秒" }
         ))
+        settingsMenu.addItem(.separator())
+
+        // Camera timing. Every one of these is read on the next tick, so
+        // changing one takes effect immediately — the point is to trade
+        // responsiveness against how much the IR emitters and camera LED are
+        // allowed to be lit.
+        settingsMenu.addItem(durationSubmenu(
+            title: "键鼠输入视为在场",
+            options: Settings.inputPresenceOptions,
+            get: { Settings.inputPresenceWindow },
+            set: { [weak self] in
+                Settings.inputPresenceWindow = $0
+                self?.coordinator.timingSettingsChanged()
+            },
+            rowLabel: { $0 == 0 ? "关闭（相机常开）" : "\(Int($0)) 秒" },
+            valueLabel: { $0 == 0 ? "关闭" : "\(Int($0))秒" }
+        ))
+        settingsMenu.addItem(durationSubmenu(
+            title: "快速检查间隔",
+            options: Settings.quickCheckIntervalOptions,
+            get: { Settings.quickCheckInterval },
+            set: { [weak self] in
+                Settings.quickCheckInterval = $0
+                self?.coordinator.timingSettingsChanged()
+            }
+        ))
+        settingsMenu.addItem(durationSubmenu(
+            title: "快速检查时长",
+            options: Settings.quickCheckDurationOptions,
+            get: { Settings.quickCheckDuration },
+            set: { [weak self] in
+                Settings.quickCheckDuration = $0
+                self?.coordinator.timingSettingsChanged()
+            },
+            rowLabel: {
+                $0 == 1 ? "1 秒" : ($0 == 1.5 ? "1.5 秒" : "\(Int($0)) 秒")
+            },
+            valueLabel: { $0 == 1.5 ? "1.5s" : "\(Int($0))秒" }
+        ))
+        settingsMenu.addItem(durationSubmenu(
+            title: "灭屏检查间隔",
+            options: Settings.dimmedCheckOptions,
+            get: { Settings.dimmedCheckInterval },
+            set: { [weak self] in
+                Settings.dimmedCheckInterval = $0
+                self?.coordinator.timingSettingsChanged()
+            }
+        ))
+        settingsMenu.addItem(durationSubmenu(
+            title: "灭屏检查时长",
+            options: Settings.dimmedCheckDurationOptions,
+            get: { Settings.dimmedCheckDuration },
+            set: { [weak self] in
+                Settings.dimmedCheckDuration = $0
+                self?.coordinator.timingSettingsChanged()
+            },
+            rowLabel: { $0 < 1 ? String(format: "%.1f 秒", $0) : "\(Int($0)) 秒" },
+            valueLabel: { $0 < 1 ? String(format: "%.1fs", $0) : "\(Int($0))秒" }
+        ))
+        settingsMenu.addItem(.separator())
         let hoursTitle: String
         if Settings.scheduleEnabled {
             let span = "\(Settings.formatMinutes(Settings.scheduleStartMinutes))–\(Settings.formatMinutes(Settings.scheduleEndMinutes))"
-            hoursTitle = "Active Hours (\(span), \(Weekday.describe(Settings.activeDays)))…"
+            hoursTitle = "监测时段（\(span)，\(Weekday.describe(Settings.activeDays))）…"
         } else {
-            hoursTitle = "Active Hours (always on)…"
+            hoursTitle = "监测时段（始终开启）…"
         }
         let hours = NSMenuItem(title: hoursTitle, action: #selector(showActiveHours), keyEquivalent: "")
         hours.target = self
@@ -178,7 +241,17 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
         // Tight layout: aligns with the native submenu rows above it, which
         // have no checkmark gutter.
-        let loginView = StayOpenOptionView(title: "Open at Login", layout: .tight)
+        let dimItem = NSMenuItem(
+            title: "只灭屏不锁屏",
+            action: #selector(toggleDimInsteadOfLock),
+            keyEquivalent: ""
+        )
+        dimItem.target = self
+        dimItem.state = Settings.dimInsteadOfLock ? .on : .off
+        settingsMenu.addItem(dimItem)
+        settingsMenu.addItem(.separator())
+
+        let loginView = StayOpenOptionView(title: "登录时启动", layout: .tight)
         loginView.isChecked = LoginItem.isRegistered
         loginView.onClick = { [weak self, weak loginView] in
             self?.toggleLaunchAtLogin()
@@ -192,9 +265,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return settings
     }
 
+    @objc private func toggleDimInsteadOfLock() {
+        Settings.dimInsteadOfLock.toggle()
+        coordinator.dimModeSettingChanged()
+    }
+
     /// A submenu of stay-open duration options; the parent title shows the
     /// chosen value and refreshes live when an option is clicked. Optional
-    /// label closures cover non-duration options (e.g. 0 = "Never Idle").
+    /// label closures cover non-duration options (e.g. 0 = "从不空闲").
     private func durationSubmenu(
         title: String,
         options: [TimeInterval],
@@ -203,8 +281,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         rowLabel: ((TimeInterval) -> String)? = nil,
         valueLabel: ((TimeInterval) -> String)? = nil
     ) -> NSMenuItem {
-        let row = rowLabel ?? { $0 == 1 ? "1 second" : "\(Int($0)) seconds" }
-        let value = valueLabel ?? { "\(Int($0))s" }
+        let row = rowLabel ?? { $0 == 1 ? "1 秒" : "\(Int($0)) 秒" }
+        let value = valueLabel ?? { "\(Int($0))秒" }
         let parent = NSMenuItem(title: "\(title) \(value(get()))", action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: title)
         submenu.autoenablesItems = false
@@ -215,7 +293,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         // Settings are never rewritten behind the user's back to force a match.
         var options = options
         if !options.contains(get()) {
-            let never = options.filter { $0 == 0 } // 0 renders as "Never", stays last
+            let never = options.filter { $0 == 0 } // 0 renders as "永不", stays last
             options = (options.filter { $0 != 0 } + [get()]).sorted() + never
         }
 
@@ -273,7 +351,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private func toggleLaunchAtLogin() {
         guard let error = LoginItem.toggle() else { return }
         let alert = NSAlert()
-        alert.messageText = "Could not update login item"
+        alert.messageText = "无法更新登录项"
         alert.informativeText = error.localizedDescription
         alert.runModal()
     }

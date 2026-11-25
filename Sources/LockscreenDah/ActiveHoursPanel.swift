@@ -1,6 +1,6 @@
 import AppKit
 
-/// Compact settings panel for the monitoring schedule: an "Always on"
+/// Compact settings panel for the monitoring schedule: an "始终开启"
 /// checkbox, hour:minute pickers for start/end, and the weekdays it runs on.
 /// Edits are local until Save — Cancel discards them.
 final class ActiveHoursPanel: NSObject {
@@ -22,18 +22,18 @@ final class ActiveHoursPanel: NSObject {
             return
         }
 
-        let panel = NSPanel.floating(title: "Active Hours & Days")
+        let panel = NSPanel.floating(title: "监测时段与日期")
 
         // Checked = ignore the schedule entirely.
         let alwaysOn = NSButton(
-            checkboxWithTitle: "Always on",
+            checkboxWithTitle: "始终开启",
             target: self,
             action: #selector(toggleAlwaysOn)
         )
         alwaysOnCheckbox = alwaysOn
 
-        let startLabel = NSTextField(labelWithString: "Start:")
-        let endLabel = NSTextField(labelWithString: "End:")
+        let startLabel = NSTextField(labelWithString: "开始：")
+        let endLabel = NSTextField(labelWithString: "结束：")
         for label in [startLabel, endLabel] {
             label.font = .systemFont(ofSize: 13)
         }
@@ -60,7 +60,7 @@ final class ActiveHoursPanel: NSObject {
         }
 
         let allDays = NSButton(
-            checkboxWithTitle: "All days",
+            checkboxWithTitle: "每天",
             target: self,
             action: #selector(toggleAllDays)
         )
@@ -84,7 +84,7 @@ final class ActiveHoursPanel: NSObject {
         dayRow.spacing = 8
         dayRow.alignment = .centerY
 
-        let daysLabel = NSTextField(labelWithString: "Days:")
+        let daysLabel = NSTextField(labelWithString: "日期：")
         daysLabel.font = .systemFont(ofSize: 13)
 
         // Everything hangs off the same leading edge.
@@ -94,8 +94,8 @@ final class ActiveHoursPanel: NSObject {
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let cancel = NSButton.rounded("Cancel", target: self, action: #selector(cancelTapped))
-        let save = NSButton.rounded("Save", target: self, action: #selector(saveTapped), isDefault: true)
+        let cancel = NSButton.rounded("取消", target: self, action: #selector(cancelTapped))
+        let save = NSButton.rounded("保存", target: self, action: #selector(saveTapped), isDefault: true)
 
         let buttons = NSStackView(views: [cancel, save])
         buttons.orientation = .horizontal
@@ -173,7 +173,7 @@ final class ActiveHoursPanel: NSObject {
 
     @objc private func toggleAllDays() {
         let all = allDaysCheckbox?.state == .on
-        // Unticking "All days" would otherwise leave every day selected and the
+        // Unticking "每天" would otherwise leave every day selected and the
         // checkbox contradicting them, so fall back to the default work week.
         let target = all ? Set(1...7) : ScheduleConfig.defaultActiveDays
         for (weekday, box) in dayCheckboxes {
@@ -195,7 +195,7 @@ final class ActiveHoursPanel: NSObject {
     @objc private func saveTapped() {
         let alwaysOn = alwaysOnCheckbox?.state == .on
 
-        // Only validate what the user can actually edit: when "Always on" is
+        // Only validate what the user can actually edit: when "始终开启" is
         // ticked the schedule controls are disabled, and the stored hours/days
         // are left untouched so they're still there if it's unticked later.
         if !alwaysOn {
@@ -207,15 +207,15 @@ final class ActiveHoursPanel: NSObject {
             // none of it? Reject rather than silently picking one.
             guard start != end else {
                 reject(
-                    "Start and end can't be the same time.",
-                    "Choose different times, or tick \u{201C}Always on\u{201D} to monitor around the clock."
+                    "开始和结束时间不能相同。",
+                    "请选择不同的时间，或勾选「始终开启」以全天监测。"
                 )
                 return
             }
             guard !checkedDays.isEmpty else {
                 reject(
-                    "Choose at least one day.",
-                    "With no days selected, monitoring would never run — which looks configured but protects nothing."
+                    "请至少选择一天。",
+                    "未选择任何日期时监测不会运行——看起来已配置，实际没有任何保护。"
                 )
                 return
             }

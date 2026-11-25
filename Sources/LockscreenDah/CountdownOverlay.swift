@@ -1,50 +1,124 @@
 import AppKit
 import AVFoundation
 
-/// The countdown overlay: a blank black takeover of every screen with a
-/// small, faded countdown in the bottom-right corner. To a passerby it reads
-/// as a display that went to sleep — and it hides whatever was on screen — but
-/// to the owner nearby the sudden blackout plus a soft chime is the cue to
-/// come back.
+/// The overlay that blacks out every screen: either a countdown before a lock,
+/// or the message-free dim surface.
 ///
-/// Cancelling: facing the screen is the intended cancel (face match). Esc no
-/// longer cancels on its own — three presses on the same overlay ask for Touch
-/// ID instead, so there is no unauthenticated way to dismiss a countdown. The
-/// prompt for that is only revealed after the first press, so a passerby sees
-/// nothing; clicks do nothing either.
+/// Windows are built once and then reused. Rebuilding them on every show/dismiss
+/// meant creating and destroying full-screen windows at `.screenSaver` level
+/// several times a minute; that churn is the leading suspect behind the
+/// WindowServer watchdog panics (its main thread was stuck in a recursive
+/// QuartzCore call), so presentation is now `orderFrontRegardless`/`orderOut` on
+/// existing windows, with no CoreAnimation fade.
 final class CountdownOverlay: NSObject {
     var onEscape: (() -> Void)?
 
-    private var windows: [NSWindow] = []
+    private var windows: [EscapableWindow] = []
     private var countdownLabels: [NSTextField] = []
     private var hintLabels: [NSTextField] = []
     private var hint: String?
     /// Last value passed to `show`/`update`, so a rebuild can redraw immediately.
     private var lastRemaining: TimeInterval = 0
     private var screenObserver: NSObjectProtocol?
+    /// True while this is the message-free dim surface rather than a countdown.
+    private var isBlank = false
+    /// Whether the overlay is currently on screen.
+    private var isPresented = false
+    /// `NSApp.activate` is only worth one call; repeating it on every presentation
+    /// is more window-server traffic for no benefit.
+    private var hasActivated = false
 
     func show(remaining: TimeInterval) {
-        dismiss()
-        // A display attached (or rearranged) mid-countdown would otherwise stay
-        // uncovered, mirroring or extending the desktop the overlay exists to
-        // hide. Rebuilding covers the new layout — without replaying the chime
-        // or restarting the fade, which would make a monitor being plugged in
-        // look like a fresh countdown.
-        screenObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self, !self.windows.isEmpty else { return }
-            self.buildWindows(remaining: self.lastRemaining, fadeIn: false)
-        }
-        buildWindows(remaining: remaining, fadeIn: true)
+        // A fresh countdown must not inherit a hint from the previous one.
+        hint = nil
+        present(showCountdown: true)
+        update(remaining: remaining)
+        applyHint()
         if let chime = NSSound(named: "Tink") {
             chime.volume = 0.5
             chime.play()
         }
     }
 
-    private func buildWindows(remaining: TimeInterval, fadeIn: Bool) {
+    /// The dim-mode surface: a blank takeover of every screen, no countdown, no
+    /// hint, no chime. Kept message-free on purpose — to a passerby it must read
+    /// as a display that went to sleep, and the owner is not there to read
+    /// anything.
+    func showBlank() {
+        present(showCountdown: false)
+        lastRemaining = 0
+    }
+
+    func dismiss() {
+        isPresented = false
+        for window in windows {
+            window.orderOut(nil)
+        }
+    }
+
+    func update(remaining: TimeInterval) {
+        lastRemaining = remaining
+        let seconds = max(0, Int(remaining.rounded(.up)))
+        let text = "\(seconds)"
+        for label in countdownLabels where label.stringValue != text {
+            label.stringValue = text
+        }
+    }
+
+    /// Revealed only once the user has actually pressed Esc, so the gesture
+    /// isn't advertised to someone walking past a blacked-out screen.
+    func setHint(_ text: String?) {
+        hint = text
+        applyHint()
+    }
+
+    // MARK: - Presentation
+
+    private func present(showCountdown: Bool) {
+        isBlank = !showCountdown
+        isPresented = true
+        ensureWindows()
+
+        for label in countdownLabels { label.isHidden = !showCountdown }
+        for label in hintLabels { label.isHidden = !showCountdown }
+
+        for window in windows {
+            window.alphaValue = 1
+            window.orderFrontRegardless()
+        }
+        // Key focus so stray keystrokes land on the (inert) overlay instead of
+        // whatever window was exposed underneath. Esc is handled there.
+        if let first = windows.first, !first.isKeyWindow {
+            first.makeKey()
+        }
+        if !hasActivated {
+            hasActivated = true
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func ensureWindows() {
+        guard windows.isEmpty else { return }
+        installScreenObserver()
+        rebuildWindows()
+    }
+
+    /// A display attached (or rearranged) mid-overlay would otherwise stay
+    /// uncovered. This is the only case that still rebuilds — it is rare, and a
+    /// stale window covering the wrong screen is worse than one rebuild.
+    private func installScreenObserver() {
+        guard screenObserver == nil else { return }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.windows.isEmpty else { return }
+            self.rebuildWindows()
+            if self.isPresented { self.present(showCountdown: !self.isBlank) }
+        }
+    }
+
+    private func rebuildWindows() {
         for window in windows {
             window.orderOut(nil)
         }
@@ -65,6 +139,7 @@ final class CountdownOverlay: NSObject {
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             window.isReleasedWhenClosed = false
             window.onEscape = { [weak self] in self?.onEscape?() }
+            window.alphaValue = 1
 
             let countdown = NSTextField(labelWithString: "")
             countdown.font = .monospacedDigitSystemFont(ofSize: 42, weight: .medium)
@@ -90,59 +165,8 @@ final class CountdownOverlay: NSObject {
                 hintLabel.bottomAnchor.constraint(equalTo: countdown.topAnchor, constant: -6),
             ])
             window.contentView = content
-
-            window.alphaValue = fadeIn ? 0 : 1
-            window.orderFrontRegardless()
             windows.append(window)
         }
-
-        // Grab key focus so stray keystrokes land on the (inert) overlay
-        // instead of whatever window was exposed underneath.
-        windows.first?.makeKey()
-        NSApp.activate(ignoringOtherApps: true)
-
-        update(remaining: remaining)
-        applyHint()
-        guard fadeIn else { return }
-        NSAnimationContext.runAnimationGroup { context in
-            // Short enough that the countdown is legible almost immediately:
-            // the fade is subtracted from the warning the user actually gets,
-            // and at a 1 s countdown a half-second fade ate half of it.
-            context.duration = 0.2
-            for window in windows {
-                window.animator().alphaValue = 1
-            }
-        }
-    }
-
-    func update(remaining: TimeInterval) {
-        lastRemaining = remaining
-        let seconds = max(0, Int(remaining.rounded(.up)))
-        let text = "\(seconds)"
-        for label in countdownLabels where label.stringValue != text {
-            label.stringValue = text
-        }
-    }
-
-    func dismiss() {
-        if let screenObserver {
-            NotificationCenter.default.removeObserver(screenObserver)
-            self.screenObserver = nil
-        }
-        for window in windows {
-            window.orderOut(nil)
-        }
-        windows.removeAll()
-        countdownLabels.removeAll()
-        hintLabels.removeAll()
-        hint = nil
-    }
-
-    /// Revealed only once the user has actually pressed Esc, so the gesture
-    /// isn't advertised to someone walking past a blacked-out screen.
-    func setHint(_ text: String?) {
-        hint = text
-        applyHint()
     }
 
     private func applyHint() {

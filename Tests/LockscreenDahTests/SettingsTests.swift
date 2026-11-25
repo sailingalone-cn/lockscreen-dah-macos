@@ -140,14 +140,50 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Settings.consecutiveLocksWithoutMatch, 2)
     }
 
+    // MARK: - Stored-value normalisation
+
+    func testNormalizeWritesClampedDurationsBack() {
+        Settings.defaults.set(0.5, forKey: "dimmedCheckDuration")
+        Settings.defaults.set(2.0, forKey: "dimmedCheckInterval")
+        Settings.defaults.set(999_999.0, forKey: "gracePeriod")
+
+        Settings.normalizeStoredValues()
+
+        XCTAssertEqual(Settings.defaults.double(forKey: "dimmedCheckDuration"), 1.5)
+        XCTAssertEqual(Settings.defaults.double(forKey: "dimmedCheckInterval"), 3)
+        XCTAssertEqual(Settings.defaults.double(forKey: "gracePeriod"), 600)
+        // The menu reads the same values, so the store and the UI now agree.
+        XCTAssertEqual(Settings.dimmedCheckDuration, 1.5)
+        XCTAssertEqual(Settings.dimmedCheckInterval, 3)
+    }
+
+    func testNormalizePreservesNeverCountdownZero() {
+        Settings.defaults.set(0.0, forKey: "countdownDuration")
+        Settings.normalizeStoredValues()
+        XCTAssertEqual(Settings.defaults.double(forKey: "countdownDuration"), 0)
+        XCTAssertEqual(Settings.countdownDuration, 0)
+    }
+
+    func testNormalizeLeavesAbsentKeysAbsent() {
+        Settings.normalizeStoredValues()
+        XCTAssertNil(Settings.defaults.object(forKey: "dimmedCheckDuration"))
+        XCTAssertNil(Settings.defaults.object(forKey: "gracePeriod"))
+    }
+
+    func testNormalizeClampsNegativeLockCounter() {
+        Settings.defaults.set(-5, forKey: "consecutiveLocksWithoutMatch")
+        Settings.normalizeStoredValues()
+        XCTAssertEqual(Settings.defaults.integer(forKey: "consecutiveLocksWithoutMatch"), 0)
+    }
+
     // MARK: - Display
 
     func testFormatMinutesUsesATwelveHourClock() {
-        XCTAssertEqual(Settings.formatMinutes(0), "12:00 AM")
-        XCTAssertEqual(Settings.formatMinutes(9 * 60), "9:00 AM")
-        XCTAssertEqual(Settings.formatMinutes(12 * 60), "12:00 PM")
-        XCTAssertEqual(Settings.formatMinutes(20 * 60 + 30), "8:30 PM")
-        XCTAssertEqual(Settings.formatMinutes(23 * 60 + 5), "11:05 PM")
+        XCTAssertEqual(Settings.formatMinutes(0), "00:00")
+        XCTAssertEqual(Settings.formatMinutes(9 * 60), "09:00")
+        XCTAssertEqual(Settings.formatMinutes(12 * 60), "12:00")
+        XCTAssertEqual(Settings.formatMinutes(20 * 60 + 30), "20:30")
+        XCTAssertEqual(Settings.formatMinutes(23 * 60 + 5), "23:05")
     }
 
     // MARK: - Helpers

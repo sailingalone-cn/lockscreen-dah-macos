@@ -79,8 +79,8 @@ final class EnrollmentController {
             guard let self, self.monitor.collectEnrollmentSamples else { return }
             self.panel.show(session: self.monitor.session, totalSamples: self.totalSamples)
             self.panel.setInstruction(self.stages[0].instruction)
-            self.panel.setStatus("Position your face in the oval.")
-            self.panel.setPrimary(title: "Start")
+            self.panel.setStatus("请把脸放进椭圆框内。")
+            self.panel.setPrimary(title: "开始")
             self.panel.setSecondary(title: nil)
             self.panel.setCancelVisible(true)
         }
@@ -118,7 +118,7 @@ final class EnrollmentController {
                 onProfileCommitted?()
                 finish()
             } catch {
-                showFailure("Could not save the profile: \(error.localizedDescription)")
+                showFailure("无法保存档案：\(error.localizedDescription)")
             }
         case .failed:
             begin() // Re-Enroll — already authenticated this session
@@ -150,7 +150,7 @@ final class EnrollmentController {
         phase = .capturing
         stageSettleUntil = Date().addingTimeInterval(stageSettleTime)
         panel.setInstruction(stages[stageIndex].instruction)
-        panel.setStatus("Get ready…")
+        panel.setStatus("准备中…")
         panel.setCountdown(Int(stageSettleTime))
         panel.setStageProgress(nil)
         panel.setPrimary(title: nil)
@@ -165,7 +165,7 @@ final class EnrollmentController {
     private func startStageTimeout() {
         timeout?.invalidate()
         let timer = Timer(timeInterval: 60, repeats: false) { [weak self] _ in
-            self?.showFailure("Timed out: not enough captures. Try again with better lighting.")
+            self?.showFailure("超时：采集帧数不足。请改善光线后重试。")
         }
         RunLoop.main.add(timer, forMode: .common)
         timeout = timer
@@ -179,7 +179,7 @@ final class EnrollmentController {
         panel.setCountdown(nil)
         panel.setStageProgress(nil)
         panel.showVerifyFailure(message)
-        panel.setPrimary(title: "Re-Enroll")
+        panel.setPrimary(title: "重新录入")
         panel.setSecondary(title: nil)
         panel.setCancelVisible(true)
     }
@@ -237,7 +237,7 @@ final class EnrollmentController {
         panel.setInstruction(stage.instruction)
 
         guard result.enrollmentSample != nil || result.faceCount > 0 else {
-            panel.setStatus("Move into the oval", isProblem: true)
+            panel.setStatus("请移到椭圆框内", isProblem: true)
             return
         }
 
@@ -251,7 +251,7 @@ final class EnrollmentController {
 
         guard let sample = result.enrollmentSample else {
             logPose("stage=\(stageIndex) no-sample (face in frame, embedding failed)")
-            panel.setStatus("Hold still…", isProblem: true)
+            panel.setStatus("请保持不动…", isProblem: true)
             return
         }
         let accepted = stage.accepts(sample, completedStageSamples)
@@ -268,7 +268,7 @@ final class EnrollmentController {
         currentStageSamples.append(sample)
         panel.setProgress(samples.count)
         panel.setStageProgress(currentStageSamples.count * 100 / stage.target)
-        panel.setStatus("Hold still…")
+        panel.setStatus("请保持不动…")
 
         if currentStageSamples.count >= stage.target {
             timeout?.invalidate()
@@ -291,9 +291,9 @@ final class EnrollmentController {
                 phase = .stageDone
                 panel.setStageProgress(nil)
                 panel.setInstruction(stages[stageIndex].instruction)
-                panel.setStatus("Ready for the next pose?")
-                panel.setPrimary(title: "Continue")
-                panel.setSecondary(title: "Recapture")
+                panel.setStatus("准备好下一个姿势了吗？")
+                panel.setPrimary(title: "继续")
+                panel.setSecondary(title: "重新拍摄")
                 panel.setCancelVisible(false)
             }
         }
@@ -309,8 +309,8 @@ final class EnrollmentController {
         verifyStreak = 0
         panel.setCountdown(nil)
         panel.setStageProgress(nil)
-        panel.setInstruction("Look at the camera")
-        panel.setStatus("Verifying…")
+        panel.setInstruction("请看向摄像头")
+        panel.setStatus("正在验证…")
         panel.setPrimary(title: nil)
         panel.setSecondary(title: nil)
         panel.setCancelVisible(false)
@@ -319,7 +319,7 @@ final class EnrollmentController {
         let timer = Timer(timeInterval: 20, repeats: false) { [weak self] _ in
             guard let self, self.phase == .verifying else { return }
             self.showFailure(
-                "Couldn't recognize you with the new profile. Re-enroll with better lighting; this profile was not saved."
+                "用新档案无法识别你。请改善光线后重新录入；本次档案未保存。"
             )
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -330,7 +330,7 @@ final class EnrollmentController {
         guard phase == .verifying, let candidateProfile else { return }
         guard let sample = result.enrollmentSample else {
             panel.setStatus(
-                result.faceCount > 0 ? "Hold still…" : "Move into the oval",
+                result.faceCount > 0 ? "请保持不动…" : "请移到椭圆框内",
                 isProblem: true
             )
             return
@@ -339,7 +339,7 @@ final class EnrollmentController {
         if similarity >= Settings.matchThreshold {
             verifyStreak += 1
             panel.setStatus(
-                String(format: "Match %.2f ✓  (%d / %d)", similarity, verifyStreak, verifyStreakTarget)
+                String(format: "匹配 %.2f ✓（%d / %d）", similarity, verifyStreak, verifyStreakTarget)
             )
             if verifyStreak >= verifyStreakTarget {
                 phase = .succeeded
@@ -352,18 +352,18 @@ final class EnrollmentController {
                 // threshold could safely be tightened.
                 if let scores = recognizer.lastEnrollmentScores {
                     panel.setStatus(String(
-                        format: "Live %.2f · profile worst pose %.2f, mean %.2f across %d templates",
+                        format: "实时 %.2f · 档案最差姿势 %.2f，平均 %.2f（共 %d 个模板）",
                         similarity, scores.worst, scores.mean, scores.templates
                     ))
                 }
-                panel.setPrimary(title: "Save")
-                panel.setSecondary(title: "Verify")
+                panel.setPrimary(title: "保存")
+                panel.setSecondary(title: "验证")
                 panel.setCancelVisible(false)
             }
         } else {
             verifyStreak = 0
             panel.setStatus(
-                String(format: "Match %.2f, below the %.2f threshold", similarity, Settings.matchThreshold),
+                String(format: "匹配 %.2f，低于阈值 %.2f", similarity, Settings.matchThreshold),
                 isProblem: true
             )
         }

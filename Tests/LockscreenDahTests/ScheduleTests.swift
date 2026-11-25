@@ -216,11 +216,11 @@ final class ScheduleTests: XCTestCase {
 
     func testDescribeActiveDays() {
         Settings.activeDays = Set(1...7)
-        XCTAssertEqual(Weekday.describe(Settings.activeDays), "All days")
+        XCTAssertEqual(Weekday.describe(Settings.activeDays), "每天")
         Settings.activeDays = ScheduleConfig.defaultActiveDays
-        XCTAssertEqual(Weekday.describe(Settings.activeDays), "Mon–Fri")
+        XCTAssertEqual(Weekday.describe(Settings.activeDays), "周一至周五")
         Settings.activeDays = [1, 7]
-        XCTAssertEqual(Weekday.describe(Settings.activeDays), "Weekends")
+        XCTAssertEqual(Weekday.describe(Settings.activeDays), "周末")
     }
 
     // MARK: - Calendars other than the tester's

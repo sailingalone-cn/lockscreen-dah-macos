@@ -108,18 +108,20 @@ enum Weekday {
     /// Work weeks read Monday-first, whereas `Calendar` numbers Sunday as 1.
     static let displayOrder = [2, 3, 4, 5, 6, 7, 1]
 
+    /// Chinese weekday name, independent of the system locale: the UI is
+    /// Chinese, so "周一" must not turn into "Mon" on an English system.
     static func name(_ weekday: Int, calendar: Calendar = .current) -> String {
-        let symbols = calendar.shortWeekdaySymbols // index 0 == Sunday
+        let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
         guard (1...7).contains(weekday) else { return "?" }
-        return symbols[weekday - 1]
+        return names[weekday - 1]
     }
 
-    /// Compact description for the menu: "All days", "Mon–Fri", "Weekends", or a
+    /// Compact description for the menu: "每天", "周一至周五", "周末", or a
     /// comma list.
     static func describe(_ days: Set<Int>, calendar: Calendar = .current) -> String {
-        if days.count == 7 { return "All days" }
-        if days == ScheduleConfig.defaultActiveDays { return "Mon–Fri" }
-        if days == [1, 7] { return "Weekends" }
+        if days.count == 7 { return "每天" }
+        if days == ScheduleConfig.defaultActiveDays { return "周一至周五" }
+        if days == [1, 7] { return "周末" }
         return displayOrder.filter(days.contains)
             .map { name($0, calendar: calendar) }
             .joined(separator: ", ")

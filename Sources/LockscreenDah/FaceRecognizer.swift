@@ -353,7 +353,7 @@ final class FaceRecognizer {
     func makeCandidateProfile(poseSamples: [[EnrollmentSample]]) throws -> FaceProfile {
         let samples = poseSamples.flatMap { $0 }
         guard let dimensions = samples.first?.embedding.count, dimensions > 0 else {
-            throw enrollmentError("No enrollment samples captured.")
+            throw enrollmentError("没有采集到任何人脸样本。")
         }
         guard poseSamples.allSatisfy({ $0.count >= 2 }),
               dimensions == Self.embeddingDimensions,
@@ -361,7 +361,7 @@ final class FaceRecognizer {
                   $0.embedding.count == dimensions && $0.embedding.allSatisfy(\.isFinite)
               })
         else {
-            throw enrollmentError("Enrollment poses were incomplete or incompatible.")
+            throw enrollmentError("录入姿势不完整或不兼容。")
         }
 
         let (templates, restingPitch) = Self.buildPoseTemplates(
@@ -415,7 +415,7 @@ final class FaceRecognizer {
         let meanSimilarity = similarities.reduce(0, +) / Float(similarities.count)
         guard poseMeans.allSatisfy({ $0 >= 0.5 }) else {
             throw enrollmentError(
-                "A captured pose was too inconsistent (overall score \(String(format: "%.2f", meanSimilarity))). Try again with better lighting."
+                "某个姿势的采集结果不一致（综合分数 \(String(format: "%.2f", meanSimilarity))）。请改善光线后重试。"
             )
         }
 

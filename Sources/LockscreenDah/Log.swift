@@ -51,6 +51,7 @@ extension MonitorCoordinator.State {
         case .locked: return "locked"
         case .enrolling: return "enrolling"
         case .cameraUnavailable: return "cameraUnavailable"
+        case .dimmed: return "dimmed"
         }
     }
 }

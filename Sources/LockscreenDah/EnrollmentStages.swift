@@ -38,14 +38,14 @@ enum EnrollmentStages {
 
     static let all: [EnrollmentStage] = [
         EnrollmentStage(
-            instruction: "Look straight ahead",
+            instruction: "请正对前方",
             target: 4,
             // No pitch condition: this stage *defines* the resting pose, so it
             // must not assume one. Measured resting pitch is ~0.2 rad on a
             // laptop and varies with screen height — an absolute gate here would
             // reject people for sitting low.
             accepts: { sample, _ in abs(sample.yaw) <= maxRestingYaw },
-            correction: "Face the camera straight on"
+            correction: "正面朝向摄像头"
         ),
         // Neither turn stage depends on which yaw sign means which direction.
         // The preview is mirrored (so it behaves like a mirror) while Vision
@@ -53,13 +53,13 @@ enum EnrollmentStages {
         // yaw need not agree. All the profile needs is two *opposite* turns;
         // whichever way the user goes first defines the pair.
         EnrollmentStage(
-            instruction: "Turn slightly left",
+            instruction: "向左稍转头",
             target: 4,
             accepts: { sample, _ in abs(sample.yaw) >= FaceRecognizer.turnedYaw },
-            correction: "Turn your head a little further"
+            correction: "再转一点"
         ),
         EnrollmentStage(
-            instruction: "Now turn slightly right",
+            instruction: "现在向右稍转头",
             target: 4,
             accepts: { sample, completed in
                 guard abs(sample.yaw) >= FaceRecognizer.turnedYaw else { return false }
@@ -72,13 +72,13 @@ enum EnrollmentStages {
                 let reference = firstTurn.reduce(0) { $0 + $1.yaw } / Float(firstTurn.count)
                 return sample.yaw * reference < 0
             },
-            correction: "Turn the other way instead"
+            correction: "改为向另一侧转"
         ),
         // The posture asked about most — typing while looking at the keyboard —
         // and the one the profile had no template for, which is what let the
         // owner's own face score as unrecognised.
         EnrollmentStage(
-            instruction: "Now look down at your keyboard",
+            instruction: "现在低头看向键盘",
             target: 4,
             accepts: { sample, completed in
                 // Relative to the resting pitch stage one captured, never to
@@ -89,7 +89,7 @@ enum EnrollmentStages {
                 let baseline = resting.reduce(0) { $0 + $1.pitch } / Float(resting.count)
                 return abs(sample.pitch - baseline) > FaceRecognizer.tiltedPitch
             },
-            correction: "Tip your head down a little further"
+            correction: "再低一点"
         ),
     ]
 }

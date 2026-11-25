@@ -8,6 +8,8 @@ enum SupervisedState: Equatable {
     case locked
     case enrolling
     case cameraUnavailable
+    /// Screens blacked out, session open, camera still looking.
+    case dimmed
 }
 
 /// Everything the supervisor is allowed to reason from — all of it read from
@@ -48,11 +50,15 @@ enum SupervisionDecision: Equatable {
 /// drifting apart — the notifications are now a prompt to re-decide rather than
 /// separate logic that has to stay in agreement.
 enum PresenceSupervisor {
+    /// - Parameter dimOnly: dim mode never locks. It is passed in rather than
+    ///   read from `Settings` so the rule stays pure and both behaviours stay
+    ///   testable without touching user defaults.
     static func decide(
         state: SupervisedState,
         conditions: SystemConditions,
         gracePeriod: TimeInterval,
-        staleAfter: TimeInterval
+        staleAfter: TimeInterval,
+        dimOnly: Bool = false
     ) -> SupervisionDecision {
         switch state {
         case .paused, .enrolling:
@@ -72,6 +78,14 @@ enum PresenceSupervisor {
             let screenIsUsable = !conditions.sessionLocked && !conditions.displayAsleep
             return screenIsUsable ? .resumeFromLocked : .doNothing
 
+        case .dimmed:
+            // The camera must keep running — it is the only way back — so the
+            // only conditions that matter are the ones that take sight away.
+            // A real lock or a genuinely sleeping display outranks dim mode:
+            // park in .locked, and resumeFromLocked re-decides on wake.
+            if conditions.sessionLocked || conditions.displayAsleep { return .enterLocked }
+            return conditions.secondsSinceLastFrame > staleAfter ? .cameraStopped : .doNothing
+
         case .watching, .alerting:
             if conditions.sessionLocked { return .enterLocked }
             if conditions.displayAsleep {
@@ -80,6 +94,10 @@ enum PresenceSupervisor {
                 // still see, so it locks — the same rule the blind-camera path
                 // uses. Otherwise park without locking: a sleeping display on
                 // its own proves nothing.
+                //
+                // Dim mode has no lock to fall back on, so it only ever parks:
+                // locking here would demand a password the user opted out of.
+                if dimOnly { return .enterLocked }
                 return conditions.secondsSinceOwnerSeen >= gracePeriod ? .lockNow : .enterLocked
             }
             return conditions.secondsSinceLastFrame > staleAfter ? .cameraStopped : .doNothing

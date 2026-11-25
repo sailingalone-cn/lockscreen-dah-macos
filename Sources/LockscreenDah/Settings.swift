@@ -51,6 +51,133 @@ enum Settings {
     /// lock immediately on presence lapse, with no overlay and so no Esc.
     static var countdownDisabled: Bool { countdownDuration == 0 }
 
+    // MARK: - Presence geometry (infrared calibration)
+
+    /// Minimum share of the frame a face must cover to count as a person.
+    ///
+    /// This is the difference between "a face-shaped thing is in the image" and
+    /// "someone is sitting here". Measured on the X1 Extreme's integrated IR
+    /// camera (80 s / 625 frames): seated 5.0–9.6 %, leaning back 1.48–3.39 %,
+    /// empty room 0.21–0.55 % — and the empty-room rectangles are *false
+    /// positives* that Vision reports on 100 % of frames with confidence up to
+    /// 0.88, higher than the seated owner's 0.82–0.89. Confidence and "a face
+    /// was detected" therefore cannot answer this question; area can.
+    ///
+    /// 1 % sits between the two clusters with ~1.5× margin on each side. The
+    /// upstream 2 % default was calibrated on a visible-light camera and
+    /// rejects a leaning-back owner on roughly half of all frames, which in dim
+    /// mode would black the screen out while they are still sitting there.
+    static var minFaceAreaRatio: Double {
+        get { min(max(value(forKey: "minFaceAreaRatio", default: 0.01), 0.0), 0.5) }
+        set { defaults.set(newValue, forKey: "minFaceAreaRatio") }
+    }
+
+    // MARK: - Dim mode
+
+    /// When true, confirmed absence blacks the screens out instead of locking
+    /// the session. The screen comes back on the owner's face, so returning
+    /// needs no password. Off restores the upstream lock behaviour.
+    static var dimInsteadOfLock: Bool {
+        get { value(forKey: "dimInsteadOfLock", default: true) }
+        set { defaults.set(newValue, forKey: "dimInsteadOfLock") }
+    }
+
+    // MARK: - Camera gating (how often the sensor is actually opened)
+    //
+    // Every interval here is a user setting and is read on every tick, so a
+    // change takes effect immediately — no relaunch. The camera is the only
+    // expensive and *visible* part of this app: while it streams, the IR
+    // emitters strobe and the camera LED stays lit, so the design is to open it
+    // only when there is something to learn.
+
+    /// Keyboard/mouse input within this window counts as presence, and the
+    /// camera stays shut. Input is proof someone is there; opening the sensor
+    /// would add nothing and light the emitters. 0 disables gating entirely
+    /// (upstream behaviour: camera always open).
+    static var inputPresenceWindow: TimeInterval {
+        get { clampDuration(value(forKey: "inputPresenceWindow", default: 5), min: 0, max: 600) }
+        set { defaults.set(clampDuration(newValue, min: 0, max: 600), forKey: "inputPresenceWindow") }
+    }
+
+    /// Gap between quick checks once presence is established and the machine is
+    /// idle. Shorter = faster to notice someone leaving, more emitter flicker.
+    static var quickCheckInterval: TimeInterval {
+        get { clampDuration(value(forKey: "quickCheckInterval", default: 5), min: 0.5, max: 600) }
+        set { defaults.set(clampDuration(newValue, min: 0.5, max: 600), forKey: "quickCheckInterval") }
+    }
+
+    /// Upper bound on one quick check. A positive verdict ends it earlier, so
+    /// this is "how long may the camera stay on looking for a face".
+    static var quickCheckDuration: TimeInterval {
+        get { clampDuration(value(forKey: "quickCheckDuration", default: 1.5), min: 1, max: 30) }
+        set { defaults.set(clampDuration(newValue, min: 1, max: 30), forKey: "quickCheckDuration") }
+    }
+
+    /// Gap between dim-mode checks. The camera is only open for
+    /// `dimmedCheckDuration` inside each window, so the emitters and the camera
+    /// LED stay dark between checks instead of glowing at a black screen all
+    /// night. This is also the worst-case delay before the screen comes back.
+    static var dimmedCheckInterval: TimeInterval {
+        get { clampDuration(value(forKey: "dimmedCheckInterval", default: 3), min: 3, max: 60) }
+        set { defaults.set(clampDuration(newValue, min: 3, max: 60), forKey: "dimmedCheckInterval") }
+    }
+
+    /// How long the camera stays open per dim-mode check. Long enough for a
+    /// verdict (measured ~0.6–0.8 s from open to a match), short enough that the
+    /// LEDs are off most of the time.
+    static var dimmedCheckDuration: TimeInterval {
+        get { clampDuration(value(forKey: "dimmedCheckDuration", default: 2), min: 1.5, max: 10) }
+        set { defaults.set(clampDuration(newValue, min: 1.5, max: 10), forKey: "dimmedCheckDuration") }
+    }
+
+    private static func clampDuration(_ value: TimeInterval, min lower: TimeInterval, max upper: TimeInterval) -> TimeInterval {
+        Swift.min(Swift.max(value, lower), upper)
+    }
+
+    /// Writes the clamped value back for every stored setting whose raw value is
+    /// outside the range the app actually enforces. The getters clamp on read,
+    /// so `defaults read` used to disagree with the menu (a stored 0.5 dim
+    /// duration ran as 1.5, a stored 2 s interval ran as 3 s). Normalising once
+    /// at launch makes the stored value the truth again.
+    ///
+    /// Only touches keys that already exist: absent keys keep their documented
+    /// defaults instead of being materialised on first launch.
+    static func normalizeStoredValues() {
+        func normalizeDuration(_ key: String, _ effective: TimeInterval) {
+            guard defaults.object(forKey: key) != nil else { return }
+            if abs(defaults.double(forKey: key) - effective) > 0.0001 {
+                defaults.set(effective, forKey: key)
+            }
+        }
+        func normalizeInteger(_ key: String, _ effective: Int) {
+            guard defaults.object(forKey: key) != nil else { return }
+            if defaults.integer(forKey: key) != effective {
+                defaults.set(effective, forKey: key)
+            }
+        }
+
+        normalizeDuration("gracePeriod", gracePeriod)
+        normalizeDuration("countdownDuration", countdownDuration)
+        normalizeDuration("minFaceAreaRatio", minFaceAreaRatio)
+        normalizeDuration("inputPresenceWindow", inputPresenceWindow)
+        normalizeDuration("quickCheckInterval", quickCheckInterval)
+        normalizeDuration("quickCheckDuration", quickCheckDuration)
+        normalizeDuration("dimmedCheckInterval", dimmedCheckInterval)
+        normalizeDuration("dimmedCheckDuration", dimmedCheckDuration)
+        normalizeDuration("matchThreshold", Double(matchThreshold))
+        normalizeInteger("scheduleStartMinutes", scheduleStartMinutes)
+        normalizeInteger("scheduleEndMinutes", scheduleEndMinutes)
+        normalizeInteger("consecutiveLocksWithoutMatch", consecutiveLocksWithoutMatch)
+    }
+
+    /// Menu options. Deliberately short lists: these are comfort settings, not
+    /// precision instruments.
+    static let inputPresenceOptions: [TimeInterval] = [0, 3, 5, 10, 15, 30, 60]
+    static let quickCheckIntervalOptions: [TimeInterval] = [3, 5, 10, 15, 30, 60]
+    static let quickCheckDurationOptions: [TimeInterval] = [1, 1.5, 2, 3, 5]
+    static let dimmedCheckOptions: [TimeInterval] = [3, 5, 10, 15, 30]
+    static let dimmedCheckDurationOptions: [TimeInterval] = [1.5, 2, 3, 5]
+
     /// Cosine-similarity threshold for "this face is the owner".
     ///
     /// Raised from 0.35 once enrollment covered turned and head-down poses:
@@ -163,7 +290,10 @@ enum Settings {
     /// reconcile the real registration against the user's actual preference
     /// on every launch instead of just the first one.
     static var openAtLoginEnabled: Bool {
-        get { value(forKey: "openAtLoginEnabled", default: true) }
+        // Off by default: registering at login is a deliberate choice, and a
+        // debug or temporary copy must never be able to add itself to the login
+        // items (five such copies at once preceded two WindowServer panics).
+        get { value(forKey: "openAtLoginEnabled", default: false) }
         set { defaults.set(newValue, forKey: "openAtLoginEnabled") }
     }
 
@@ -183,14 +313,9 @@ enum Settings {
         set { defaults.set(newValue, forKey: "lastUpdateCheckNewerVersion") }
     }
 
-    /// 12-hour clock with AM/PM, matching what the time pickers display.
+    /// 24-hour clock, matching the Chinese UI.
     static func formatMinutes(_ minutes: Int) -> String {
-        let hour24 = minutes / 60
-        let minute = minutes % 60
-        var hour12 = hour24 % 12
-        if hour12 == 0 { hour12 = 12 }
-        let period = hour24 < 12 ? "AM" : "PM"
-        return String(format: "%d:%02d %@", hour12, minute, period)
+        String(format: "%02d:%02d", minutes / 60, minutes % 60)
     }
 
     /// The two duration pickers deliberately do NOT share a list. They look

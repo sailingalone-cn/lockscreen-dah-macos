@@ -23,6 +23,10 @@ struct DetectionResult {
     var frontalButUnmatched: Bool
     /// Sample from the largest near-frontal face — only populated in enrollment mode.
     var enrollmentSample: EnrollmentSample?
+    /// True when the analysed frame had no spatial variance at all (a flat,
+    /// black image). Such a verdict says nothing about presence: the sensor had
+    /// not produced a usable picture yet.
+    var imageWasFlat: Bool = false
     /// When the frame was delivered, captured before any analysis ran. The
     /// presence clock must be stamped with this rather than "now on the main
     /// thread": Vision + up to 4 Core ML embeddings + a main-thread hop sit in
@@ -248,6 +252,24 @@ final class FaceMonitor: NSObject {
         invalidateLiveness()
     }
 
+    /// Every `start()` bumps this; at the threshold the graph is rebuilt from
+    /// scratch. A long-lived session on this machine eventually streams frames
+    /// that are entirely flat — a black image with no spatial variance — while
+    /// still reporting itself as running. Measured after hundreds of stop/start
+    /// cycles: the app analysed 17 consecutive frames and found no face and no
+    /// body, while a fresh session on the same camera saw one immediately.
+    private var startsSinceRebuild = 0
+    private let rebuildAfterStarts = 50
+    /// Consecutive analysed frames with no spatial variance at all.
+    private var flatFrameStreak = 0
+    private let flatFrameLimit = 10
+    /// Whether the current session has ever produced a frame with real spatial
+    /// variance. Only a session that *had* a picture and then went flat is
+    /// degraded; a session that is flat from the first frame is just looking at
+    /// a dark room with the emitter off (or a covered lens), and rebuilding it
+    /// would only churn the camera.
+    private var sessionHadVariance = false
+
     var analysisInterval: TimeInterval {
         get { stateLock.lock(); defer { stateLock.unlock() }; return interval }
         set { stateLock.lock(); interval = newValue; stateLock.unlock() }
@@ -278,12 +300,27 @@ final class FaceMonitor: NSObject {
         if !alreadyActive { invalidateLiveness() }
 
         sessionQueue.async {
+            if self.startsSinceRebuild >= self.rebuildAfterStarts {
+                self.teardownConfiguration()
+                self.startsSinceRebuild = 0
+                Log.camera.notice("rebuilding capture graph after \(self.rebuildAfterStarts, privacy: .public) starts")
+            }
+            self.startsSinceRebuild += 1
+            self.stateLock.lock()
+            self.flatFrameStreak = 0
+            self.sessionHadVariance = false
+            self.stateLock.unlock()
             self.configureIfNeeded()
             if self.configured {
                 let wasRunning = self.session.isRunning
                 if !wasRunning { self.session.startRunning() }
                 self.stateLock.lock()
-                if !wasRunning { self.streamingSince = Uptime.now }
+                // Always re-stamp: stop/start can interleave such that
+                // `isRunning` is still true here even though the stream was just
+                // stopped. Leaving the timestamp stale disabled the warm-up gate
+                // in the flat-frame detector, which then tore the graph down
+                // during a normal warm-up.
+                self.streamingSince = Uptime.now
                 if let id = self.captureGeneration?.id {
                     self.generationGate.activate(id)
                 }
@@ -328,6 +365,127 @@ final class FaceMonitor: NSObject {
         }
     }
 
+    /// Best-effort teardown for process exit, with a hard time bound.
+    ///
+    /// Exiting on a signal while the session is streaming can leave the UVC
+    /// stream half-open in the camera daemon. Enough of those and the IR device
+    /// stops accepting new streams entirely (measured: `Input/output error` on
+    /// open while the RGB camera on the same module still worked, and it
+    /// survived a VDCAssistant restart).
+    ///
+    /// Deliberately **not** `sessionQueue.sync`: when `startRunning()` is wedged
+    /// (denied TCC, camera held elsewhere) the queue never services the block,
+    /// termination hangs, and the process keeps the single-instance lock — which
+    /// is exactly what happened on this machine. A bounded wait lets the
+    /// process die on schedule and give the lock back.
+    func shutdown() {
+        let done = DispatchSemaphore(value: 0)
+        sessionQueue.async {
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+            self.teardownConfiguration()
+            self.invalidateLiveness()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 2)
+    }
+
+    /// True when the image has essentially no variation: every sampled **luma**
+    /// byte is within a couple of levels of every other.
+    ///
+    /// Format-aware, and luma-only on purpose. The original implementation
+    /// sampled every 16th byte of every plane, which on the IR camera's packed
+    /// 2vuy (UYVY) format lands exclusively on chroma bytes — always 128 — so
+    /// *every* frame read as flat. Measured on this machine: Vision found a
+    /// face (confidence 0.82, area 10.5 %) in a frame this function called
+    /// flat. The misjudgement silently disabled the warm-up gate, the
+    /// dim-mode early close and the blind-session rebuild.
+    ///
+    /// Internal rather than private so the sampling rules can be unit-tested
+    /// against synthetic buffers without a camera.
+    static func frameIsFlat(_ pixelBuffer: CVPixelBuffer) -> Bool {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        var lowest = 255
+        var highest = 0
+        var samples = 0
+        func record(_ byte: UInt8) {
+            let value = Int(byte)
+            if value < lowest { lowest = value }
+            if value > highest { highest = value }
+            samples += 1
+        }
+
+        let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        if format == kCVPixelFormatType_422YpCbCr8 {
+            // '2vuy' (UYVY): Y is the second byte of each pixel pair.
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return false }
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            let bytes = base.assumingMemoryBound(to: UInt8.self)
+            var y = 0
+            while y < height {
+                var x = 1
+                while x < rowBytes {
+                    record(bytes[y * rowBytes + x])
+                    x += 32 // every 16th pixel
+                }
+                y += 16
+            }
+        } else if format == kCVPixelFormatType_422YpCbCr8_yuvs {
+            // 'yuvs' (YUY2): Y is the first byte of each pixel pair.
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return false }
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            let bytes = base.assumingMemoryBound(to: UInt8.self)
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < rowBytes {
+                    record(bytes[y * rowBytes + x])
+                    x += 32 // every 16th pixel
+                }
+                y += 16
+            }
+        } else if CVPixelBufferIsPlanar(pixelBuffer) {
+            // Planar YUV: plane 0 is luma; chroma planes carry no face detail.
+            guard CVPixelBufferGetPlaneCount(pixelBuffer) > 0,
+                  let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)
+            else { return false }
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+            let bytes = base.assumingMemoryBound(to: UInt8.self)
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < rowBytes {
+                    record(bytes[y * rowBytes + x])
+                    x += 16
+                }
+                y += 16
+            }
+        } else {
+            // Unknown packed format (e.g. BGRA): keep the original all-byte
+            // scan. It can only over-report variance, which is the safe side.
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return false }
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            let bytes = base.assumingMemoryBound(to: UInt8.self)
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < rowBytes {
+                    record(bytes[y * rowBytes + x])
+                    x += 16
+                }
+                y += 16
+            }
+        }
+        return samples > 0 && highest - lowest <= 2
+    }
+
     private func invalidateLiveness() {
         stateLock.lock()
         firstFrame = nil
@@ -369,6 +527,41 @@ final class FaceMonitor: NSObject {
         return firstFrame
     }
 
+    /// Prefer the near-infrared camera when the machine has one.
+    ///
+    /// `AVCaptureDevice.default(for: .video)` only ever returns a built-in
+    /// wide-angle camera. An IR module is a separate UVC device with no
+    /// `position`, so that API cannot see it at all — which is exactly why the
+    /// upstream app always opened the visible-light camera. IR is preferred
+    /// here because it works in the dark, ignores room lighting, and is what
+    /// `Settings.minFaceAreaRatio` was calibrated against.
+    private static func preferredDevice() -> AVCaptureDevice? {
+        // `.external` and `.continuityCamera` only exist from macOS 14; the
+        // package still supports 13, where a plain built-in scan is all that is
+        // available (and an IR module would not be listed there anyway).
+        let deviceTypes: [AVCaptureDevice.DeviceType]
+        if #available(macOS 14.0, *) {
+            deviceTypes = [.builtInWideAngleCamera, .external, .continuityCamera]
+        } else {
+            deviceTypes = [.builtInWideAngleCamera]
+        }
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes,
+            mediaType: .video,
+            position: .unspecified
+        )
+        var seen = Set<String>()
+        let devices = discovery.devices.filter { seen.insert($0.uniqueID).inserted }
+        for device in devices {
+            let name = device.localizedName.lowercased()
+            if name.contains("infrared") || name.contains("ir camera") || name.contains("ir webcam") {
+                Log.camera.notice("using IR camera: \(device.localizedName, privacy: .public)")
+                return device
+            }
+        }
+        return AVCaptureDevice.default(for: .video)
+    }
+
     /// Retries device configuration on every call rather than giving up
     /// permanently after one failure: a transient hiccup (camera briefly
     /// busy, device still enumerating right after waking from sleep) used to
@@ -376,7 +569,7 @@ final class FaceMonitor: NSObject {
     /// of the app's life, silently, since nothing else ever re-attempted it.
     private func configureIfNeeded() {
         guard !configured else { return }
-        guard let device = AVCaptureDevice.default(for: .video) else {
+        guard let device = Self.preferredDevice() else {
             Log.camera.error("no video device available")
             return
         }
@@ -390,9 +583,12 @@ final class FaceMonitor: NSObject {
         }
 
         session.beginConfiguration()
-        if session.canSetSessionPreset(.vga640x480) {
-            session.sessionPreset = .vga640x480
-        }
+        // No sessionPreset on purpose. `.vga640x480` selects a format the IR
+        // module will not stream from on this machine: the session starts, the
+        // device is configured, and no frame ever arrives (measured: stall at
+        // 3.3 s, three restarts, same result). Left to itself AVFoundation picks
+        // a working default — the same thing the standalone probe does — and the
+        // presence geometry is normalised, so the exact resolution is irrelevant.
         session.addInput(input)
         let generation = CaptureGeneration(id: nextGenerationID, owner: self)
         nextGenerationID += 1
@@ -416,8 +612,16 @@ final class FaceMonitor: NSObject {
         // the assumption that this worked. What actually bounds the expensive
         // work is the analysis throttle in captureOutput; this only trims the
         // capture pipeline on devices that honour it.
-        if let slowest = device.activeFormat.videoSupportedFrameRateRanges
-            .map(\.minFrameRate).min(), slowest > 0 {
+        //
+        // Only attempted on a format that offers a rate range at all. The IR
+        // module reports a single fixed rate (640x480@60 is 60-60), and asking
+        // it to change raises an Objective-C exception from
+        // `setActiveVideoMinFrameDuration:` that Swift cannot catch — measured
+        // as a SIGSEGV crash at launch, not a caught error.
+        let rates = device.activeFormat.videoSupportedFrameRateRanges
+        let slowest = rates.map(\.minFrameRate).min() ?? 0
+        let fastest = rates.map(\.maxFrameRate).max() ?? 0
+        if slowest > 0, slowest < fastest {
             do {
                 try device.lockForConfiguration()
                 let duration = CMTime(value: 1, timescale: Int32(slowest.rounded()))
@@ -460,9 +664,72 @@ final class FaceMonitor: NSObject {
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        // Blind-session detector. A degraded UVC session keeps delivering frames
+        // that are perfectly flat — measured: zero spatial variance, no face, no
+        // body, while a fresh session on the same camera saw the user instantly.
+        // Real scenes always have variation, so a run of flat frames means "the
+        // sensor is seeing nothing", not "nobody is here".
+        let flat = Self.frameIsFlat(pixelBuffer)
+        stateLock.lock()
+        // A freshly opened IR session is black for its first second while the
+        // emitter and auto-exposure come up — measured: the first verdict at
+        // 0.46 s has no face, the next at 0.78 s does. Counting those warm-up
+        // frames as a blind session tore the graph down mid-warm-up, which
+        // restarted the warm-up, over and over. Only judge a session that has
+        // been streaming for a while.
+        let warmedUp = streamingSince.map { now - $0 > 2 } ?? false
+        if !flat { sessionHadVariance = true }
+        if !warmedUp || !flat || !sessionHadVariance {
+            flatFrameStreak = 0
+        } else {
+            flatFrameStreak += 1
+        }
+        let shouldRebuild = flatFrameStreak >= flatFrameLimit
+        if shouldRebuild { flatFrameStreak = 0 }
+        stateLock.unlock()
+        if shouldRebuild {
+            Log.camera.error("frames are flat (no spatial variance); rebuilding the capture graph")
+            teardown()
+            start()
+            return
+        }
+
+        // A frame with no spatial variance cannot contain a judgeable face, so
+        // the cheapest verdict is also the honest one. Skipping Vision here is
+        // what keeps a dim-mode check cheap: every pulse reopens the sensor and
+        // its first frames are still ramping up, which used to pay for an
+        // inference per blank frame. The frame is still reported (so liveness,
+        // the warm-up gate and the blind-session detector all see it); only the
+        // inference is omitted.
+        if flat {
+            guard generationIsActive(generation.id) else { return }
+            let result = DetectionResult(
+                faceCount: 0,
+                bodyCount: 0,
+                ownerMatched: false,
+                strangerSeen: false,
+                frontalButUnmatched: false,
+                imageWasFlat: true,
+                capturedAt: now
+            )
+            if !enrollmentMode {
+                Log.recognition.debug("flat frame; vision skipped")
+            }
+            onResult?(generation.id, result)
+            return
+        }
+
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
         guard (try? handler.perform([generation.faceRequest])) != nil else { return }
-        let faces = generation.faceRequest.results ?? []
+        // Presence floor, see Settings.minFaceAreaRatio: an empty room still
+        // produces small high-confidence rectangles, so "a face was detected"
+        // is not the same question as "someone is at this desk". Filtering here
+        // — once, before counting or matching — keeps every consumer (presence
+        // chain, enrollment, dim-mode wake) on the same definition of a person.
+        let minArea = CGFloat(Settings.minFaceAreaRatio)
+        let faces = (generation.faceRequest.results ?? []).filter {
+            $0.boundingBox.width * $0.boundingBox.height >= minArea
+        }
         var qualityFaces: [VNFaceObservation] = []
         if enrollmentMode {
             // Keep the revision-pinned rectangle request as the source of pose
@@ -479,7 +746,11 @@ final class FaceMonitor: NSObject {
         // frame, where it could never change the outcome.
         var bodyCount = 0
         if faces.isEmpty, (try? handler.perform([generation.humanRequest])) != nil {
-            bodyCount = generation.humanRequest.results?.count ?? 0
+            // Same floor for the fallback signal: a body that covers less than
+            // the face floor is background, not the person at the keyboard.
+            bodyCount = (generation.humanRequest.results ?? []).filter {
+                $0.boundingBox.width * $0.boundingBox.height >= minArea
+            }.count
         }
 
         // -1 distinguishes "no face was scored at all" from a genuine 0.0 match.
@@ -498,6 +769,7 @@ final class FaceMonitor: NSObject {
             ownerMatched: false,
             strangerSeen: false,
             frontalButUnmatched: false,
+            imageWasFlat: flat,
             capturedAt: now
         )
 

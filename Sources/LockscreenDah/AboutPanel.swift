@@ -1,10 +1,10 @@
 import AppKit
 import CryptoKit
 
-/// "About Lockscreen Dah?" popup: intro, author, version, and update actions
+/// "关于 Lockscreen Dah" popup: intro, author, version, and update actions
 /// backed by the GitHub releases API. The main button reads "Check for
-/// Update" until a newer release is found, then "Download Update" (fetch +
-/// verify the release build into Downloads); "Check Releases" just opens
+/// Update" until a newer release is found, then "下载更新" (fetch +
+/// verify the release build into Downloads); "查看发布页" just opens
 /// the releases page.
 final class AboutPanel: NSObject {
     static let shared = AboutPanel()
@@ -33,7 +33,7 @@ final class AboutPanel: NSObject {
         }
 
         let panel = NSPanel.floating(
-            title: "About Lockscreen Dah?",
+            title: "关于 Lockscreen Dah",
             contentSize: NSSize(width: 420, height: 380)
         )
         panel.center()
@@ -53,13 +53,12 @@ final class AboutPanel: NSObject {
         let name = NSTextField(labelWithString: "Lockscreen Dah?")
         name.font = .systemFont(ofSize: 24, weight: .bold)
 
-        let version = NSTextField(labelWithString: "Version \(Self.currentVersion)")
+        let version = NSTextField(labelWithString: "版本 \(Self.currentVersion)")
         version.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         version.textColor = .secondaryLabelColor
 
         let intro = NSTextField(wrappingLabelWithString:
-            "Watches for your face and locks your screen the moment you step " +
-            "away. All recognition runs on-device; no image ever leaves your computer."
+            "看着你的脸：你一起身离开，就关闭屏幕。所有人脸识别都在本机完成，图像不会离开这台电脑。"
         )
         intro.font = .systemFont(ofSize: 13)
         intro.textColor = .secondaryLabelColor
@@ -71,15 +70,14 @@ final class AboutPanel: NSObject {
         let purpose = NSTextField(wrappingLabelWithString: "")
         let purposeFont = NSFont.systemFont(ofSize: 13)
         let purposeText = NSMutableAttributedString(
-            string: "Built to make workplace security a habit: never leave your "
-                + "screen on and unattended. ",
+            string: "让屏幕安全成为一种习惯：不要让屏幕在无人看管时一直亮着。",
             attributes: [
                 .font: purposeFont,
                 .foregroundColor: NSColor.secondaryLabelColor,
             ]
         )
         purposeText.append(NSAttributedString(
-            string: "Read more",
+            string: "了解更多",
             attributes: [
                 .font: purposeFont,
                 .foregroundColor: NSColor.secondaryLabelColor,
@@ -97,7 +95,7 @@ final class AboutPanel: NSObject {
         // attribute as a clickable link once it's selectable.
         let author = NSTextField(labelWithString: "")
         let authorText = NSMutableAttributedString(
-            string: "Built by ",
+            string: "作者：",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 12),
                 .foregroundColor: NSColor.tertiaryLabelColor,
@@ -114,8 +112,8 @@ final class AboutPanel: NSObject {
         author.isSelectable = true
         author.allowsEditingTextAttributes = true
 
-        let releases = NSButton.rounded("Check Releases", target: self, action: #selector(openReleases))
-        let download = NSButton.rounded("Check for Update", target: self, action: #selector(checkForUpdate), isDefault: true)
+        let releases = NSButton.rounded("查看发布页", target: self, action: #selector(openReleases))
+        let download = NSButton.rounded("检查更新", target: self, action: #selector(checkForUpdate), isDefault: true)
         downloadButton = download
 
         let buttons = NSStackView(views: [releases, download])
@@ -167,7 +165,7 @@ final class AboutPanel: NSObject {
     private static let checkFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd hh:mm a"
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()
 
@@ -176,7 +174,7 @@ final class AboutPanel: NSObject {
     /// label/action and the status line below it.
     private func refreshUpdateUI() {
         let newerAvailable = Settings.lastUpdateCheckNewerVersion.map { Self.isVersion($0, newerThan: Self.currentVersion) } ?? false
-        downloadButton?.title = newerAvailable ? "Download Update" : "Check for Update"
+        downloadButton?.title = newerAvailable ? "下载更新" : "检查更新"
         downloadButton?.action = newerAvailable ? #selector(downloadUpdate) : #selector(checkForUpdate)
 
         guard let lastCheck = Settings.lastUpdateCheckAt else {
@@ -184,14 +182,14 @@ final class AboutPanel: NSObject {
             return
         }
         let when = Self.checkFormatter.string(from: lastCheck)
-        setStatus(newerAvailable ? "New version available. Last check: \(when)" : "You're up to date. Last check: \(when)")
+        setStatus(newerAvailable ? "有新版本可用。上次检查：\(when)" : "已是最新版本。上次检查：\(when)")
     }
 
     /// Step one: ask GitHub for the latest release and record the result.
     /// Doesn't download anything — see downloadUpdate for that.
     @objc private func checkForUpdate() {
         downloadButton?.isEnabled = false
-        setStatus("Checking…")
+        setStatus("正在检查…")
 
         let task = URLSession.shared.dataTask(with: Self.latestReleaseAPI) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -205,7 +203,7 @@ final class AboutPanel: NSObject {
         downloadButton?.isEnabled = true
 
         if let error {
-            setStatus("Couldn't check: \(error.localizedDescription)")
+            setStatus("检查失败：\(error.localizedDescription)")
             return
         }
         if let http = response as? HTTPURLResponse, http.statusCode == 404 {
@@ -217,7 +215,7 @@ final class AboutPanel: NSObject {
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let tag = json["tag_name"] as? String
         else {
-            setStatus("Couldn't read the release info from GitHub.")
+            setStatus("无法读取 GitHub 上的发布信息。")
             return
         }
 
@@ -235,7 +233,7 @@ final class AboutPanel: NSObject {
             let assetURL = URL(string: urlString)
         else {
             recordCheck(newerVersion: nil) // a newer tag exists, but nothing to download yet
-            setStatus("v\(latest) is available, but has no downloadable build yet. Tap Check Releases.")
+            setStatus("v\(latest) 已发布，但还没有可下载的构建。请点击「查看发布页」。")
             return
         }
 
@@ -265,7 +263,7 @@ final class AboutPanel: NSObject {
             return
         }
         downloadButton?.isEnabled = false
-        setStatus("Downloading v\(update.version)…")
+        setStatus("正在下载 v\(update.version)…")
         let task = URLSession.shared.downloadTask(with: update.assetURL) { [weak self] tempURL, _, error in
             let outcome = Self.finishDownload(tempURL: tempURL, error: error, name: update.assetName, expectedDigest: update.digest)
             DispatchQueue.main.async {
@@ -273,7 +271,7 @@ final class AboutPanel: NSObject {
                 switch outcome {
                 case .success(let dest):
                     NSWorkspace.shared.activateFileViewerSelecting([dest])
-                    self?.setStatus("Downloaded v\(update.version) to Downloads. Drag it into Applications to update.")
+                    self?.setStatus("已下载 v\(update.version) 到「下载」文件夹。拖入「应用程序」即可更新。")
                 case .failure(let message):
                     self?.setStatus(message)
                 }
@@ -292,15 +290,15 @@ final class AboutPanel: NSObject {
         name: String,
         expectedDigest: String?
     ) -> DownloadOutcome {
-        if let error { return .failure("Download failed: \(error.localizedDescription)") }
+        if let error { return .failure("下载失败：\(error.localizedDescription)") }
         guard let tempURL, let data = try? Data(contentsOf: tempURL) else {
-            return .failure("Download failed: no data received.")
+            return .failure("下载失败：未收到数据。")
         }
         if let expectedDigest, expectedDigest.hasPrefix("sha256:") {
             let want = expectedDigest.dropFirst("sha256:".count).lowercased()
             let got = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             guard got == want else {
-                return .failure("Checksum mismatch: download rejected. Use Check Releases instead.")
+                return .failure("校验和不匹配，已拒绝下载。请改用「查看发布页」。")
             }
         }
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
@@ -311,7 +309,7 @@ final class AboutPanel: NSObject {
             try data.write(to: dest)
             return .success(dest)
         } catch {
-            return .failure("Couldn't save to Downloads: \(error.localizedDescription)")
+            return .failure("无法保存到「下载」文件夹：\(error.localizedDescription)")
         }
     }
 

@@ -9,6 +9,11 @@ final class MonitorCoordinator {
         case paused
         case watching
         case alerting(deadline: TimeInterval)
+        /// Screens are blacked out but the session stays unlocked and the
+        /// camera keeps looking, so the owner's face brings the screen back
+        /// without a password. Entered instead of `.alerting` when
+        /// `Settings.dimInsteadOfLock` is on.
+        case dimmed
         case locked
         case enrolling
         /// The camera could not be started, and a retry is pending.
@@ -75,6 +80,10 @@ final class MonitorCoordinator {
     /// the overlay, and polling for the deadline on it landed the lock a
     /// measured ~0.13 s late on average (0.27 s worst case).
     private lazy var lockTimer = DeadlineTimer { [weak self] in self?.handleCountdownExpired() }
+    /// Precise one-shot timer for the dim-mode pulse. The 1 s tick is far too
+    /// coarse for a 1 s camera window — a 1 s setting measured 1.2–2.0 s of open
+    /// time — and every extra 100 ms is emitter time the user can see.
+    private lazy var dimTimer = DeadlineTimer { [weak self] in self?.advanceDimCycle() }
     /// The seat-continuity chain — see PresenceTracker for the model.
     private var presence = PresenceTracker()
     /// When the capture session was last asked to start. A countdown deadline
@@ -111,6 +120,15 @@ final class MonitorCoordinator {
     /// still looking at the frames". Frames arriving proves only that the camera
     /// is alive.
     private var lastResultAt: TimeInterval?
+    /// True while the capture session is deliberately stopped — input is proof
+    /// of presence, or a quick check just finished. Liveness must not read this
+    /// as a camera failure, and `handleGraceExpired` must not conclude absence
+    /// from it.
+    private var cameraGated = true
+    /// Start of the in-flight quick check, if any.
+    private var burstStartedAt: TimeInterval?
+    /// Earliest instant the next quick check may open the camera.
+    private var nextCheckAt: TimeInterval = 0
     /// How long analysis may go quiet before it counts as stalled. Derived from
     /// the current cadence rather than fixed, because results are throttled by
     /// design — at the idle interval of 2.5 s a fixed 3 s bar would call a
@@ -163,6 +181,9 @@ final class MonitorCoordinator {
     /// already paid for, which doubled both the countdown's timing error and
     /// the time needed to cancel one.
     private let fastAnalysisInterval: TimeInterval = 0.25
+    /// Cadence while dimmed, read live so a menu change applies on the next
+    /// analysis tick instead of the next dim cycle.
+    private var dimmedAnalysisInterval: TimeInterval { Settings.dimmedCheckInterval }
     /// Steady-state cadence while the presence chain is healthy. Scales with
     /// the countdown delay — a long delay doesn't need frequent sampling — and
     /// is capped at 2.5 s so the 3-frame stranger challenge always resolves
@@ -175,6 +196,14 @@ final class MonitorCoordinator {
 
     /// Whether monitoring was active when enrollment began (restored after).
     private var resumeAfterEnrollment = false
+
+    /// Start of the in-flight dim-mode check, if any.
+    private var dimCheckStartedAt: TimeInterval?
+    /// Earliest instant the next dim-mode check may open the camera.
+    private var nextDimCheckAt: TimeInterval = 0
+    /// Whether the current dim check has produced a frame with a real image
+    /// (not a flat warm-up frame); such a frame ends the check early.
+    private var dimCheckSawUsableFrame = false
 
     // Esc is the escape hatch for when recognition has failed the real owner, so
     // it must exist — but a single un-checked press would also be exactly what an
@@ -266,39 +295,58 @@ final class MonitorCoordinator {
     func pause() {
         guard state != .paused else { return }
         overlay.dismiss()
+        DisplayBrightness.restore()
         cancelEscapeAuth()
         enrollment.abort()
         stopTick()
         stopGraceTimer()
         stopLockTimer()
+        dimTimer.cancel()
         cameraRetryTimer.cancel()
         monitor.stop()
         lastDecisionAt = Date() // a real "not watching" decision — see resolveSchedule
         state = .paused
     }
 
+    /// Process exit. Stops the stream synchronously so the camera daemon is not
+    /// left with a half-open UVC session, which is what wedged the IR device.
+    func shutdownCamera() {
+        stopTick()
+        stopGraceTimer()
+        stopLockTimer()
+        dimTimer.cancel()
+        cameraRetryTimer.cancel()
+        overlay.dismiss()
+        DisplayBrightness.restore()
+        monitor.shutdown()
+    }
+
     var statusDescription: String {
         switch state {
         case .cameraUnavailable:
-            return "Camera unavailable — retrying"
+            return "摄像头不可用，正在重试"
         case .paused:
-            if Settings.reenrollmentRequired { return "Paused (re-enrollment needed)" }
+            if Settings.reenrollmentRequired { return "已暂停（需要重新录入）" }
             if Settings.scheduleEnabled, !Settings.schedule.isActive(at: Date()) {
                 // Distinguish the two reasons: "off hours" on a working day is
                 // expected, whereas being paused because today isn't a selected
                 // day is easy to forget you configured.
                 let today = Calendar.current.component(.weekday, from: Date())
                 return Settings.activeDays.contains(today)
-                    ? "Paused (off hours)"
-                    : "Paused (\(Weekday.name(today)) not active)"
+                    ? "已暂停（非监测时段）"
+                    : "已暂停（\(Weekday.name(today))未启用）"
             }
-            return "Paused"
+            return "已暂停"
         // Alerting/locked keep the watching text — the overlay or lock screen
         // is what the user sees; a special status would never be read.
         case .watching, .alerting, .locked:
-            if recognizer.isPresenceOnly { return "Watching for any face" }
-            return "Watching for you"
-        case .enrolling: return "Enrolling face…"
+            if recognizer.isPresenceOnly { return "监测中（任意人脸）" }
+            return "监测中（等待你）"
+        case .dimmed:
+            return recognizer.isPresenceOnly
+                ? "已灭屏（任意人脸唤醒）"
+                : "已灭屏（等待你回来）"
+        case .enrolling: return "正在录入人脸…"
         }
     }
 
@@ -306,15 +354,22 @@ final class MonitorCoordinator {
 
     private func beginWatching() {
         cameraRetryTimer.cancel()
+        dimTimer.cancel()
         overlay.dismiss()
         presence.reset()
         lastDecisionAt = Date() // a real "watching" decision — see resolveSchedule
-        monitor.analysisInterval = idleAnalysisInterval
+        monitor.analysisInterval = fastAnalysisInterval
         cameraStartedAt = Uptime.now
         firstResultAt = nil
         lastResultAt = nil
-        Log.camera.notice("starting capture")
-        monitor.start()
+        // Deliberately do not open the sensor here. The first tick decides, and
+        // if someone is at the keyboard the answer is already known — opening it
+        // at start is what made the emitters strobe from the moment monitoring
+        // began.
+        cameraGated = true
+        burstStartedAt = nil
+        nextCheckAt = Uptime.now
+        Log.camera.notice("watching; camera gated until input goes idle")
         startTick(interval: 1)
         state = .watching
         rescheduleGraceTimer()
@@ -375,6 +430,7 @@ final class MonitorCoordinator {
         Log.camera.error("pipeline stalled (\(String(describing: liveness.stall), privacy: .public)); absenceAlreadyProven=\(absenceWasAlreadyProven, privacy: .public)")
 
         overlay.dismiss()
+        DisplayBrightness.restore()
         cancelEscapeAuth()
         stopTick()
         stopGraceTimer()
@@ -386,7 +442,10 @@ final class MonitorCoordinator {
         // nothing else.
         monitor.teardown()
 
-        if absenceWasAlreadyProven {
+        // Dim mode never locks: the user opted out of passwords on return, and
+        // a camera fault must not be the thing that forces one. Park instead —
+        // the retry ladder owns recovery.
+        if absenceWasAlreadyProven && !Settings.dimInsteadOfLock {
             // We saw you leave before we went blind. Locking is warranted, and
             // the unlock path re-anchors presence so this can't become a loop.
             lockNow()
@@ -406,8 +465,8 @@ final class MonitorCoordinator {
         guard cameraFailures >= cameraRetryDelays.count, !cameraFailureAnnounced else { return }
         cameraFailureAnnounced = true
         showAlert(
-            title: "Camera unavailable",
-            message: "Lockscreen Dah? can't see through the camera, so your screen is NOT being watched. It will keep trying and resume on its own as soon as the camera is available — check whether another app is using it. The menu bar shows a struck-through camera until then."
+            title: "摄像头不可用",
+            message: "Lockscreen Dah 无法通过摄像头看到画面，你的屏幕目前没有受到保护。它会持续重试，摄像头恢复后自动继续——请检查是否有其他程序正在占用摄像头。期间菜单栏会显示带斜杠的摄像头图标。"
         )
     }
 
@@ -451,6 +510,75 @@ final class MonitorCoordinator {
         rescheduleGraceTimer()
     }
 
+    // MARK: - Dim mode
+
+    /// Confirmed absence in dim mode: black every screen, keep the camera
+    /// running at a low cadence, and wait for a face. Deliberately no lock —
+    /// locking is what makes returning cost a password, which is the thing dim
+    /// mode exists to avoid.
+    private func enterDimmed() {
+        stopGraceTimer()
+        stopLockTimer()
+        presence.breakChain()
+        // Dim mode checks in pulses too: the screen is black, so the camera
+        // only needs to be open long enough to spot a face. Leaving it running
+        // is what kept the emitters and the camera LED lit at an empty desk.
+        monitor.stop()
+        cameraGated = true
+        dimCheckStartedAt = nil
+        nextDimCheckAt = Uptime.now
+        dimTimer.schedule(at: nextDimCheckAt)
+        monitor.analysisInterval = fastAnalysisInterval
+        overlay.showBlank()
+        DisplayBrightness.dim()
+        state = .dimmed
+        Log.state.notice("dimmed; waiting for a face")
+    }
+
+    /// A face (or, in presence-only mode, a body) is back. Restore the screen
+    /// and restart the grace clock from now, so a head that immediately turns
+    /// away does not black the screen out again on the next frame.
+    /// Why the screen came back, so the log can distinguish "the camera saw
+    /// you" from "you pressed Esc" — the old blanket "presence detected" made a
+    /// blind camera look healthy.
+    private enum WakeReason: String {
+        case face
+        case body
+        case input
+        case escape
+        case setting
+    }
+
+    private func exitDimmed(reason: WakeReason) {
+        guard state == .dimmed else { return }
+        overlay.dismiss()
+        DisplayBrightness.restore()
+        presence.establish()
+        Settings.consecutiveLocksWithoutMatch = 0
+        if !cameraGated {
+            monitor.stop()
+            cameraGated = true
+        }
+        dimCheckStartedAt = nil
+        dimTimer.cancel()
+        monitor.analysisInterval = fastAnalysisInterval
+        state = .watching
+        rescheduleGraceTimer()
+        // We just saw a face, so the next check is a full interval away — the
+        // old "check now" made the camera reopen 0.5 s after undimming.
+        nextCheckAt = Uptime.now + Settings.quickCheckInterval
+        updateCameraGate(now: Uptime.now)
+        Log.state.notice("undimmed; reason=\(reason.rawValue, privacy: .public)")
+    }
+
+    /// The user flipped the dim-mode switch while the screen was already black.
+    /// Wake it rather than leaving a black screen whose setting no longer
+    /// explains it; the next absence goes through the normal countdown.
+    func dimModeSettingChanged() {
+        guard state == .dimmed, !Settings.dimInsteadOfLock else { return }
+        exitDimmed(reason: .setting)
+    }
+
     /// One Esc press on the countdown overlay. Deliberately does **not** cancel:
     /// a single un-checked keypress that dismisses a countdown is exactly the
     /// bypass an intruder would use. Three presses ask the Mac who's pressing.
@@ -463,18 +591,26 @@ final class MonitorCoordinator {
     }
 
     private func handleEscPress() {
+        if state == .dimmed {
+            // Dim mode is not a lock: one Esc is an unauthenticated way back
+            // for the case recognition can't see the owner (head down, hand
+            // over the lens). It reveals a desktop that was never locked, so
+            // there is no protection to defeat.
+            exitDimmed(reason: .escape)
+            return
+        }
         guard case .alerting(let deadline) = state, !authenticatingEscape else { return }
         escPressesThisAlert += 1
 
         guard escapeAuthAttempts < escapeAuthAttemptLimit else {
             // Out of attempts: say so plainly and let the countdown finish.
-            overlay.setHint("Verification failed — sign in again after it locks")
+            overlay.setHint("验证失败，锁屏后请重新登录")
             return
         }
         let remaining = escPressLimit - escPressesThisAlert
         guard remaining <= 0 else {
             // Only now reveal the gesture — a passerby sees a blank screen.
-            overlay.setHint("Press Esc \(remaining) more time\(remaining == 1 ? "" : "s") to verify it's you")
+            overlay.setHint("再按 \(remaining) 次 Esc 以验证身份")
             return
         }
         confirmEscape(deadline: deadline)
@@ -491,21 +627,21 @@ final class MonitorCoordinator {
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
             // Nothing to verify against — leave the countdown running rather
             // than granting an unverified escape.
-            overlay.setHint("Can't verify on this Mac")
+            overlay.setHint("此 Mac 无法验证身份")
             return
         }
 
         authenticatingEscape = true
         escapeAuthContext = context
         stopTick()
-        overlay.setHint("Verifying…")
+        overlay.setHint("正在验证…")
         // Deferred, never cancelled. An unanswered prompt is not consent, so the
         // lock still fires once the grace runs out.
         scheduleLockTimer(at: max(deadline, Uptime.now + escapeAuthGrace))
 
         context.evaluatePolicy(
             .deviceOwnerAuthentication,
-            localizedReason: "stop Lockscreen Dah? from locking your screen"
+            localizedReason: "阻止 Lockscreen Dah 锁屏"
         ) { [weak self] success, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -527,8 +663,8 @@ final class MonitorCoordinator {
                 Settings.reenrollmentRequired = true
                 self.pause()
                 self.showAlert(
-                    title: "Monitoring paused",
-                    message: "Face recognition isn't matching you reliably, so monitoring is paused and your screen is NOT being protected. Start Monitoring will walk you through re-enrolling your face; your current profile keeps working until the new one is saved."
+                    title: "监测已暂停",
+                    message: "人脸识别无法稳定匹配你，监测已暂停，你的屏幕目前没有受到保护。点击「开始监测」会引导你重新录入人脸；在新档案保存之前，旧档案仍然有效。"
                 )
             }
         }
@@ -548,17 +684,19 @@ final class MonitorCoordinator {
             Log.lock.fault("macOS rejected the lock request; monitoring paused")
             self.pause()
             self.showAlert(
-                title: "Screen lock failed",
-                message: "Lockscreen Dah? could not lock the screen: the countdown finished but macOS rejected the lock request. Monitoring is paused; your screen is NOT being protected until this is resolved."
+                title: "锁屏失败",
+                message: "Lockscreen Dah 无法锁屏：倒计时已结束，但 macOS 拒绝了锁屏请求。监测已暂停，问题解决前你的屏幕没有受到保护。"
             )
         }
     }
 
     private func enterLockedState() {
         overlay.dismiss()
+        DisplayBrightness.restore()
         cancelEscapeAuth()
         stopGraceTimer()
         stopLockTimer()
+        dimTimer.cancel()
         monitor.stop()
         state = .locked
     }
@@ -605,6 +743,13 @@ final class MonitorCoordinator {
             // and charging that to absence made the countdown that much late.
             if presence.observe(result, now: result.capturedAt) {
                 Settings.consecutiveLocksWithoutMatch = 0
+                // A positive verdict is the whole point of a quick check: keep
+                // the sensor on for another frame or two is pure emitter time.
+                // Gating off (`inputPresenceWindow == 0`) means the user asked
+                // for continuous capture, so leave it running.
+                if Settings.inputPresenceWindow > 0, !cameraGated {
+                    stopCameraForPresence()
+                }
             }
             // Every observation can move lastOwnerSeen forward (or leave it
             // put) — reschedule unconditionally rather than trying to detect
@@ -620,6 +765,33 @@ final class MonitorCoordinator {
             }
         case .enrolling:
             enrollment.handleDetection(result)
+        case .dimmed:
+            // A frame with a real image (not a flat warm-up frame) ends the
+            // check early: keeping the camera open longer cannot teach us more.
+            // The 0.8 s gate ignores the first verdict of every session, which
+            // is reliably a pre-exposure frame.
+            if !result.imageWasFlat,
+               let started = dimCheckStartedAt,
+               result.capturedAt - started >= 0.8 {
+                dimCheckSawUsableFrame = true
+                // A usable frame with nobody in it settles the check: close the
+                // camera now instead of waiting for the next 1 s tick (which
+                // often lands just before the frame and lets the check run to
+                // its cap, doubling the emitter time).
+                if !result.ownerMatched,
+                   !(recognizer.isPresenceOnly && result.bodyCount > 0) {
+                    stopDimCheck()
+                    return
+                }
+            }
+            // A face is the primary way back; body-only frames count too in
+            // presence-only mode, so someone who returns with their head turned
+            // still gets their screen back.
+            if result.ownerMatched {
+                exitDimmed(reason: .face)
+            } else if recognizer.isPresenceOnly, result.bodyCount > 0 {
+                exitDimmed(reason: .body)
+            }
         case .paused, .locked, .cameraUnavailable:
             break
         }
@@ -668,6 +840,7 @@ final class MonitorCoordinator {
         case .locked: return .locked
         case .enrolling: return .enrolling
         case .cameraUnavailable: return .cameraUnavailable
+        case .dimmed: return .dimmed
         }
     }
 
@@ -677,6 +850,12 @@ final class MonitorCoordinator {
     /// separate path with its own rules.
     private func superviseInvariants() {
         let now = Uptime.now
+        // A camera stopped on purpose is not a camera failure. Only the session
+        // lock still outranks the gate: a locked screen must park the state.
+        if cameraGated, state == .watching || state == .dimmed {
+            if ScreenLocker.sessionIsLocked || ScreenLocker.displayIsAsleep { enterLockedState() }
+            return
+        }
         // Both halves come from one helper: the bar varies with whether the
         // session is streaming yet, and passing a gap measured one way against a
         // bar meant for the other is the whole bug this replaced.
@@ -690,7 +869,8 @@ final class MonitorCoordinator {
                 secondsSinceOwnerSeen: now - graceAnchor
             ),
             gracePeriod: Settings.gracePeriod,
-            staleAfter: liveness.bar
+            staleAfter: liveness.bar,
+            dimOnly: Settings.dimInsteadOfLock
         )
         if decision != .doNothing {
             // The conditions, not just the outcome: which fact drove it is the
@@ -773,6 +953,20 @@ final class MonitorCoordinator {
     private func handleGraceExpired() {
         guard state == .watching else { return }
         let now = Uptime.now
+        // No frame can be had while the gate is shut, so absence cannot be
+        // concluded from it. Wait for the next quick check instead of
+        // re-firing this timer every second.
+        if cameraGated {
+            // Must be in the future: a zero-delay re-arm here spun the main
+            // queue forever (the handler kept re-scheduling the same past
+            // deadline). `now + 0.5` is the floor that makes that impossible.
+            scheduleGraceTimer(
+                at: max(Uptime.now + 0.5,
+                        max(graceAnchor + Settings.gracePeriod,
+                            nextCheckAt + Settings.quickCheckDuration))
+            )
+            return
+        }
         guard now - graceAnchor >= Settings.gracePeriod else {
             rescheduleGraceTimer()
             return
@@ -781,6 +975,13 @@ final class MonitorCoordinator {
         // rule, shared with the tick supervisor, so the two can't disagree.
         guard !cameraIsStale(now: now) else {
             handleCameraStopped(now: now)
+            return
+        }
+        // Dim mode: absence is confirmed, so black the screens out and keep
+        // looking. No countdown — there is nothing to count down to, and no
+        // lock, so coming back needs no password.
+        if Settings.dimInsteadOfLock {
+            enterDimmed()
             return
         }
         // "Never Countdown": nothing to show, so lock straight from here. Note
@@ -835,21 +1036,181 @@ final class MonitorCoordinator {
     private func handleTick() {
         switch state {
         case .watching:
-            let now = Uptime.now
-            // Camera liveness is not checked here — `superviseInvariants` owns
-            // it for every state, including the ones that stop this timer.
-            // The alert fires off graceTimer, not this poll — this only picks the
-            // sampling rate: faster once absence is actually suspected, cheaper
-            // while the chain is healthy. Same anchor the deadline uses, so
-            // cadence and deadline can't disagree.
-            monitor.analysisInterval = now - graceAnchor > Settings.gracePeriod / 2
-                ? fastAnalysisInterval
-                : idleAnalysisInterval
+            // Typing is presence continuously, not just at the moment the camera
+            // is shut. Without this renewal the grace deadline stayed in the
+            // past during a long typing stretch, and handleGraceExpired re-armed
+            // itself with a zero delay forever — measured at 58–117 % CPU with
+            // the camera off, and it starved the main queue so detection
+            // callbacks arrived late or not at all.
+            let window = Settings.inputPresenceWindow
+            if window > 0, InputIdle.seconds() < window {
+                presence.touch()
+                rescheduleGraceTimer()
+            }
+            updateCameraGate(now: Uptime.now)
         case .alerting(let deadline):
             // Redraw only — lockTimer owns the deadline, so this poll's
             // ~0.13 s average lag no longer delays the lock itself.
             overlay.update(remaining: max(0, deadline - Uptime.now))
+        case .dimmed:
+            // Any real keyboard/mouse activity is a wake signal. Dim mode is not
+            // a lock — the screen was only blacked out — and the camera cannot
+            // always see the owner (head down, hand over the lens, a session
+            // that went blind). Without this the only way back was Esc, which is
+            // what made a blind camera feel like a frozen app.
+            if InputIdle.seconds() < 1.5 {
+                exitDimmed(reason: .input)
+                return
+            }
+            updateDimmedGate(now: Uptime.now)
         case .paused, .locked, .enrolling, .cameraUnavailable:
+            break
+        }
+    }
+
+    // MARK: - Camera gating
+
+    /// Re-decides, once a second while watching, whether the sensor should be
+    /// open. Every threshold is a setting read here, so a menu change applies on
+    /// the next tick.
+    private func updateCameraGate(now: TimeInterval) {
+        let action = ActivityGate.decide(
+            idle: InputIdle.seconds(),
+            inputWindow: Settings.inputPresenceWindow,
+            cameraRunning: !cameraGated,
+            burstStartedAt: burstStartedAt,
+            nextCheckAt: nextCheckAt,
+            now: now,
+            burstDuration: Settings.quickCheckDuration
+        )
+        switch action {
+        case .nothing:
+            break
+        case .stopCamera:
+            stopCameraForInput()
+        case .startBurst:
+            startQuickCheck(now: now)
+        case .endBurst:
+            // The burst hit its ceiling with no verdict. Absence is now
+            // suspected, so keep the camera open and let the grace deadline —
+            // or a face — settle it.
+            burstStartedAt = nil
+            monitor.analysisInterval = fastAnalysisInterval
+            Log.camera.notice("quick check inconclusive; watching continuously")
+        }
+    }
+
+    /// Input is recent: shut the camera and count the input as presence.
+    private func stopCameraForInput() {
+        guard !cameraGated else { return }
+        monitor.stop()
+        cameraGated = true
+        burstStartedAt = nil
+        nextCheckAt = Uptime.now + Settings.quickCheckInterval
+        presence.touch()
+        rescheduleGraceTimer()
+        Log.camera.notice("camera off; input activity")
+    }
+
+    /// A verdict said "present": the quick check has done its job.
+    private func stopCameraForPresence() {
+        guard !cameraGated else { return }
+        monitor.stop()
+        cameraGated = true
+        burstStartedAt = nil
+        nextCheckAt = Uptime.now + Settings.quickCheckInterval
+        Log.camera.notice("camera off; presence confirmed")
+    }
+
+    private func startQuickCheck(now: TimeInterval) {
+        cameraGated = false
+        burstStartedAt = now
+        cameraStartedAt = now
+        firstResultAt = nil
+        lastResultAt = nil
+        monitor.analysisInterval = fastAnalysisInterval
+        Log.camera.notice("quick check: opening camera")
+        monitor.start()
+    }
+
+    /// Dim mode's pulse: open the camera for `dimmedCheckDuration`, close it,
+    /// wait `dimmedCheckInterval`, repeat. A face ends it immediately through
+    /// `handleDetection` → `exitDimmed`, so the worst case is one pulse.
+    private func updateDimmedGate(now: TimeInterval) {
+        let action = ActivityGate.decideDimmed(
+            cameraRunning: !cameraGated,
+            checkStartedAt: dimCheckStartedAt,
+            nextCheckAt: nextDimCheckAt,
+            now: now,
+            checkDuration: Settings.dimmedCheckDuration,
+            sawUsableFrame: dimCheckSawUsableFrame
+        )
+        switch action {
+        case .startBurst:
+            startDimCheck(now: now)
+        case .stopCamera:
+            stopDimCheck()
+        case .nothing, .endBurst:
+            break
+        }
+    }
+
+    private func startDimCheck(now: TimeInterval) {
+        guard cameraGated else { return }
+        cameraGated = false
+        dimCheckSawUsableFrame = false
+        dimCheckStartedAt = now
+        cameraStartedAt = now
+        firstResultAt = nil
+        lastResultAt = nil
+        monitor.analysisInterval = fastAnalysisInterval
+        dimTimer.schedule(at: now + Settings.dimmedCheckDuration)
+        Log.camera.notice("dim check: opening camera")
+        monitor.start()
+    }
+
+    private func stopDimCheck() {
+        guard !cameraGated else { return }
+        monitor.stop()
+        cameraGated = true
+        dimCheckSawUsableFrame = false
+        dimCheckStartedAt = nil
+        nextDimCheckAt = Uptime.now + Settings.dimmedCheckInterval
+        dimTimer.schedule(at: nextDimCheckAt)
+        Log.camera.notice("dim check: camera off")
+    }
+
+    /// One step of the pulse. `dimTimer` owns the timing so the window is the
+    /// configured length rather than whatever the 1 s tick happened to round to.
+    private func advanceDimCycle() {
+        guard state == .dimmed else { return }
+        if cameraGated {
+            startDimCheck(now: Uptime.now)
+        } else {
+            stopDimCheck()
+        }
+    }
+
+    /// Any gating timing changed in the menu. Applied immediately: a pending
+    /// check is brought forward to the new interval and a running camera
+    /// re-evaluates now instead of waiting out the settings that just changed.
+    func timingSettingsChanged() {
+        switch state {
+        case .dimmed:
+            if cameraGated {
+                nextDimCheckAt = min(nextDimCheckAt, Uptime.now + Settings.dimmedCheckInterval)
+                dimTimer.schedule(at: nextDimCheckAt)
+            } else if let started = dimCheckStartedAt {
+                // A shorter window applies to the check already running.
+                dimTimer.schedule(at: started + Settings.dimmedCheckDuration)
+            }
+            updateDimmedGate(now: Uptime.now)
+        case .watching:
+            if cameraGated {
+                nextCheckAt = min(nextCheckAt, Uptime.now + Settings.quickCheckInterval)
+            }
+            updateCameraGate(now: Uptime.now)
+        default:
             break
         }
     }
@@ -859,8 +1220,8 @@ final class MonitorCoordinator {
     func enrollFace(completion: ((Bool) -> Void)? = nil) {
         guard recognizer.hasModel else {
             showAlert(
-                title: "Face model missing",
-                message: "FaceEmbedding.mlmodelc was not bundled. Run scripts/fetch-model.sh and rebuild."
+                title: "缺少人脸模型",
+                message: "未打包 FaceEmbedding.mlmodelc。请运行 scripts/fetch-model.sh 后重新构建。"
             )
             completion?(false)
             return
@@ -872,15 +1233,15 @@ final class MonitorCoordinator {
         var authError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
             showAlert(
-                title: "Authentication unavailable",
-                message: authError?.localizedDescription ?? "Cannot verify your identity on this Mac."
+                title: "无法验证身份",
+                message: authError?.localizedDescription ?? "无法在此 Mac 上验证你的身份。"
             )
             completion?(false)
             return
         }
         context.evaluatePolicy(
             .deviceOwnerAuthentication,
-            localizedReason: "enroll the face that keeps your screen unlocked"
+            localizedReason: "录入用于解锁屏幕的人脸"
         ) { [weak self] success, _ in
             DispatchQueue.main.async {
                 guard success else {
@@ -894,8 +1255,9 @@ final class MonitorCoordinator {
     }
 
     private func beginEnrollment() {
-        resumeAfterEnrollment = state == .watching || isAlerting
+        resumeAfterEnrollment = state == .watching || state == .dimmed || isAlerting
         overlay.dismiss()
+        DisplayBrightness.restore()
         stopTick()
         stopGraceTimer()
         stopLockTimer()
@@ -955,7 +1317,7 @@ final class MonitorCoordinator {
             lastDecisionAt = Date()
             ScreenLocker.sessionIsLocked ? enterLockedState() : startMonitoring()
         case .watching where !within, .alerting where !within,
-             .cameraUnavailable where !within:
+             .dimmed where !within, .cameraUnavailable where !within:
             pause() // stamps lastDecisionAt itself
         default:
             break
@@ -1037,16 +1399,26 @@ final class MonitorCoordinator {
     // MARK: - Camera permission
 
     private func withCameraPermission(_ proceed: @escaping () -> Void) {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        Log.camera.notice("camera auth at start: \(status.rawValue, privacy: .public)")
+        switch status {
         case .authorized:
             proceed()
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { granted in
-                DispatchQueue.main.async {
-                    if granted {
-                        proceed()
-                    } else {
-                        self.showCameraDeniedAlert()
+            // TCC hangs its prompt off the requesting app, and an accessory app
+            // launched by launchd is not frontmost yet. Asking during
+            // applicationDidFinishLaunching got an immediate "denied" with no
+            // prompt ever shown on this machine; activating first and letting
+            // the launch settle is what makes the request legitimate.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NSApp.activate(ignoringOtherApps: true)
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    DispatchQueue.main.async {
+                        if granted {
+                            proceed()
+                        } else {
+                            self.showCameraDeniedAlert()
+                        }
                     }
                 }
             }
@@ -1059,19 +1431,24 @@ final class MonitorCoordinator {
         // Full teardown, not a bare `state = .paused`: reached from
         // beginEnrollment(), which deliberately leaves the capture session
         // running for the enrollment preview, so assigning the state directly
-        // left the camera live behind a menu reading "Paused" with no path
+        // left the camera live behind a menu reading "已暂停" with no path
         // back (enrollmentFinished() only fires from .enrolling).
         pause()
         let alert = NSAlert()
-        alert.messageText = "Camera access needed"
-        alert.informativeText = "Lockscreen Dah? needs the camera to see whether you're at your screen. Enable it in System Settings → Privacy & Security → Camera."
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = "需要摄像头权限"
+        alert.informativeText = "Lockscreen Dah 需要摄像头来判断你是否在屏幕前。请在「系统设置 → 隐私与安全性 → 摄像头」中允许访问。"
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "取消")
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn,
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
             NSWorkspace.shared.open(url)
         }
+        // This launch cannot monitor. Quitting releases the single-instance
+        // lock; previously the denied .app sat behind this modal holding it, so
+        // the .command launcher could not start a working instance.
+        Log.camera.notice("camera access denied; quitting to release the instance lock")
+        NSApp.terminate(nil)
     }
 
     private func showAlert(title: String, message: String) {
