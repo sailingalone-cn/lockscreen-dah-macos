@@ -37,28 +37,43 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         return image
     }
 
+    /// "IR" monogram for the menu bar. Drawn rather than bundled so there is no
+    /// asset to keep in sync; a template image so macOS handles light/dark menu
+    /// bars and the selected (inverted) state.
+    private lazy var irStatusIcon: NSImage = {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let font = NSFont.systemFont(ofSize: 12.5, weight: .heavy)
+            let text = NSAttributedString(string: "IR", attributes: [
+                .font: font,
+                .foregroundColor: NSColor.black,
+            ])
+            let size = text.size()
+            text.draw(at: NSPoint(x: (rect.width - size.width) / 2,
+                                  y: (rect.height - size.height) / 2))
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
     private func refreshStatusIcon() {
-        let symbol: String
+        let symbol: String?
         switch coordinator.state {
         case .paused: symbol = "pause.circle"
         // Not the pause icon: nothing is being watched and the user didn't
-        // choose that, so it has to look like a problem rather than a setting.
+        // choose it, so it has to look like a problem rather than a setting.
         case .cameraUnavailable: symbol = "video.slash.fill"
-        // Alerting/locked keep the watching icon — the blackout overlay or
-        // lock screen hides the menu bar anyway.
-        case .watching, .alerting, .locked:
-            if coordinator.recognizer.isPresenceOnly {
-                // No enrolled face (or no model) — flag it at a glance.
-                symbol = "exclamationmark.triangle.fill"
-            } else {
-                symbol = "faceid"
-            }
+        // Watching keeps the IR mark in both presence modes — the menu's first
+        // row says whether identity is enrolled ("任意人脸" vs "等待你"), which is
+        // where that distinction belongs. Alerting/locked keep it too: the
+        // overlay or lock screen hides the menu bar anyway.
+        case .watching, .alerting, .locked: symbol = nil
         case .enrolling: symbol = "person.crop.circle.badge.plus"
         // The overlay covers the menu bar anyway; the icon only matters in the
         // instant before it is drawn.
         case .dimmed: symbol = "moon.fill"
         }
-        statusItem.button?.image = statusImage(named: symbol)
+        statusItem.button?.image = symbol.flatMap(statusImage) ?? irStatusIcon
     }
 
     // MARK: - Menu
