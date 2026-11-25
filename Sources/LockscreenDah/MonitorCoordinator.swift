@@ -738,7 +738,7 @@ final class MonitorCoordinator {
             // Stamped with the frame's own capture instant, not "now": the
             // analysis pipeline plus the hop onto this thread is 100-400 ms,
             // and charging that to absence made the countdown that much late.
-            if presence.observe(result, now: result.capturedAt) {
+            if presence.observe(result, now: result.capturedAt, presenceOnly: recognizer.isPresenceOnly) {
                 Settings.consecutiveLocksWithoutMatch = 0
                 // A positive verdict is the whole point of a quick check: keep
                 // the sensor on for another frame or two is pure emitter time.

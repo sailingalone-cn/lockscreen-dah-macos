@@ -67,6 +67,27 @@ final class PresenceTrackerTests: XCTestCase {
         XCTAssertEqual(tracker.lastOwnerSeen, later)
     }
 
+    /// Presence-only mode has no identity to match. A head-down or turned-away
+    /// owner produces an upper body but no face, so a body must be able to
+    /// establish the chain — otherwise the screen dims while they sit there and
+    /// only the next dim pulse brings it back.
+    func testBodyEstablishesTheChainInPresenceOnlyMode() {
+        var tracker = PresenceTracker(now: t0)
+        let seen = t0 + 3
+
+        XCTAssertTrue(tracker.observe(result(bodies: 1), now: seen, presenceOnly: true))
+        XCTAssertTrue(tracker.chainActive)
+        XCTAssertEqual(tracker.lastOwnerSeen, seen)
+    }
+
+    func testBodyCannotEstablishTheChainWithoutPresenceOnlyMode() {
+        var tracker = PresenceTracker(now: t0)
+
+        XCTAssertFalse(tracker.observe(result(bodies: 1), now: t0 + 3))
+        XCTAssertFalse(tracker.chainActive)
+        XCTAssertEqual(tracker.lastOwnerSeen, t0)
+    }
+
     func testEmptyFrameDoesNotMaintainTheChain() {
         var tracker = PresenceTracker(now: t0)
         tracker.establish(now: t0)

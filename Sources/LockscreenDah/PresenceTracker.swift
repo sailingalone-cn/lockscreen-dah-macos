@@ -69,11 +69,26 @@ struct PresenceTracker {
         lastOwnerSeen = now
     }
 
-    /// Folds one detection into the chain. Returns true when the owner was
-    /// positively matched.
+    /// Folds one detection into the chain. Returns true when presence was
+    /// positively confirmed — the owner matched, or (in presence-only mode) an
+    /// upper body stood in for the identity the app does not have.
+    ///
+    /// `presenceOnly` is true when no owner profile exists. An upper body then
+    /// has to be able to *establish* the chain, not merely maintain it: a
+    /// head-down or turned-away owner produces no face for long stretches, and
+    /// requiring one left the chain inactive and dimmed the screen while the
+    /// person was sitting there.
     @discardableResult
-    mutating func observe(_ result: DetectionResult, now: TimeInterval = Uptime.now) -> Bool {
+    mutating func observe(
+        _ result: DetectionResult,
+        now: TimeInterval = Uptime.now,
+        presenceOnly: Bool = false
+    ) -> Bool {
         if result.ownerMatched {
+            establish(now: now)
+            return true
+        }
+        if presenceOnly, result.bodyCount > 0, !chainActive {
             establish(now: now)
             return true
         }
