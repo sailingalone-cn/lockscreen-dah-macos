@@ -56,23 +56,23 @@ enum ActivityGate {
     /// *closes* the camera: a check that found nobody has nothing more to say,
     /// and a check that found somebody is handled by the coordinator before this
     /// timer ever fires.
+    ///
+    /// The full `checkDuration` is used even after a usable (non-flat) frame
+    /// arrives. Closing on the first usable frame saved emitter time, but on
+    /// this camera a face can first appear 1.0–1.25 s into a session (measured:
+    /// quick checks see `faces=1` at 1.05 s and 1.23 s), so the early close was
+    /// shutting the camera 0.1–0.3 s before the face was detectable. The cost is
+    /// roughly two extra analyses per empty pulse; being seen is worth it.
     static func decideDimmed(
         cameraRunning: Bool,
         checkStartedAt: TimeInterval?,
         nextCheckAt: TimeInterval,
         now: TimeInterval,
-        checkDuration: TimeInterval,
-        sawUsableFrame: Bool = false
+        checkDuration: TimeInterval
     ) -> Action {
         if cameraRunning {
             guard let started = checkStartedAt else { return .nothing }
-            let elapsed = now - started
-            // A usable frame ends the check early — there is nothing more to
-            // learn from keeping the camera open. The 0.5 s floor stops a
-            // mid-warm-up frame (some variance, but not exposed yet) from ending
-            // it before the sensor has settled.
-            if sawUsableFrame, elapsed >= 0.5 { return .stopCamera }
-            return elapsed >= checkDuration ? .stopCamera : .nothing
+            return now - started >= checkDuration ? .stopCamera : .nothing
         }
         return now >= nextCheckAt ? .startBurst : .nothing
     }

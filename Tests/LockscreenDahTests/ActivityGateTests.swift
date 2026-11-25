@@ -85,16 +85,14 @@ final class ActivityGateTests: XCTestCase {
         start: TimeInterval? = nil,
         nextCheck: TimeInterval = 0,
         now: TimeInterval = 100,
-        duration: TimeInterval = 1,
-        sawUsable: Bool = false
+        duration: TimeInterval = 1
     ) -> ActivityGate.Action {
         ActivityGate.decideDimmed(
             cameraRunning: running,
             checkStartedAt: start,
             nextCheckAt: nextCheck,
             now: now,
-            checkDuration: duration,
-            sawUsableFrame: sawUsable
+            checkDuration: duration
         )
     }
 
@@ -120,35 +118,32 @@ final class ActivityGateTests: XCTestCase {
         XCTAssertEqual(decideDim(running: true, start: 0), .stopCamera)
     }
 
-    /// A real (non-flat) frame ends the pulse early: the sensor has produced a
-    /// picture, so there is nothing left to wait for.
-    func testDimmedStopsEarlyOnceAUsableFrameArrives() {
+    /// A usable frame does **not** end the pulse. On this camera a face can
+    /// first appear 1.0–1.25 s into a session, so closing on the first
+    /// non-flat frame shut the camera 0.1–0.3 s before the face was detectable.
+    /// The clock decides when an empty check ends.
+    func testDimmedKeepsThePulseOpenDespiteAUsableFrame() {
         XCTAssertEqual(
-            decideDim(running: true, start: 99.2, duration: 2, sawUsable: true),
-            .stopCamera
-        )
-    }
-
-    /// ...but not during the first half second, which is still warm-up: a frame
-    /// with some variance there is not yet a usable exposure.
-    func testDimmedIgnoresAUsableFrameInsideTheFloor() {
-        XCTAssertEqual(
-            decideDim(running: true, start: 99.8, duration: 2, sawUsable: true),
+            decideDim(running: true, start: 99.2, duration: 2),
             .nothing
         )
-    }
-
-    /// Without a usable frame the pulse runs to its maximum.
-    func testDimmedMaxDurationWithoutAUsableFrame() {
         XCTAssertEqual(
-            decideDim(running: true, start: 98, duration: 2, sawUsable: false),
+            decideDim(running: true, start: 97.5, duration: 2),
             .stopCamera
         )
     }
 
-    func testDimmedWaitsBeforeTheMaximumWithoutAUsableFrame() {
+    /// An empty pulse runs to its maximum.
+    func testDimmedMaxDuration() {
         XCTAssertEqual(
-            decideDim(running: true, start: 99, duration: 2, sawUsable: false),
+            decideDim(running: true, start: 98, duration: 2),
+            .stopCamera
+        )
+    }
+
+    func testDimmedWaitsBeforeTheMaximum() {
+        XCTAssertEqual(
+            decideDim(running: true, start: 99, duration: 2),
             .nothing
         )
     }

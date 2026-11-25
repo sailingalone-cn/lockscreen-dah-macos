@@ -201,9 +201,6 @@ final class MonitorCoordinator {
     private var dimCheckStartedAt: TimeInterval?
     /// Earliest instant the next dim-mode check may open the camera.
     private var nextDimCheckAt: TimeInterval = 0
-    /// Whether the current dim check has produced a frame with a real image
-    /// (not a flat warm-up frame); such a frame ends the check early.
-    private var dimCheckSawUsableFrame = false
 
     // Esc is the escape hatch for when recognition has failed the real owner, so
     // it must exist — but a single un-checked press would also be exactly what an
@@ -766,24 +763,11 @@ final class MonitorCoordinator {
         case .enrolling:
             enrollment.handleDetection(result)
         case .dimmed:
-            // A frame with a real image (not a flat warm-up frame) ends the
-            // check early: keeping the camera open longer cannot teach us more.
-            // The 0.8 s gate ignores the first verdict of every session, which
-            // is reliably a pre-exposure frame.
-            if !result.imageWasFlat,
-               let started = dimCheckStartedAt,
-               result.capturedAt - started >= 0.8 {
-                dimCheckSawUsableFrame = true
-                // A usable frame with nobody in it settles the check: close the
-                // camera now instead of waiting for the next 1 s tick (which
-                // often lands just before the frame and lets the check run to
-                // its cap, doubling the emitter time).
-                if !result.ownerMatched,
-                   !(recognizer.isPresenceOnly && result.bodyCount > 0) {
-                    stopDimCheck()
-                    return
-                }
-            }
+            // The check runs to its full duration: a face can first appear
+            // 1.0–1.25 s into a session on this camera (measured: quick checks
+            // see faces=1 at 1.05 s and 1.23 s), and the old early close shut
+            // the camera 0.1–0.3 s before that. Only a face/body verdict ends
+            // the pulse early; an empty frame no longer does.
             // A face is the primary way back; body-only frames count too in
             // presence-only mode, so someone who returns with their head turned
             // still gets their screen back.
@@ -1142,8 +1126,7 @@ final class MonitorCoordinator {
             checkStartedAt: dimCheckStartedAt,
             nextCheckAt: nextDimCheckAt,
             now: now,
-            checkDuration: Settings.dimmedCheckDuration,
-            sawUsableFrame: dimCheckSawUsableFrame
+            checkDuration: Settings.dimmedCheckDuration
         )
         switch action {
         case .startBurst:
@@ -1158,7 +1141,6 @@ final class MonitorCoordinator {
     private func startDimCheck(now: TimeInterval) {
         guard cameraGated else { return }
         cameraGated = false
-        dimCheckSawUsableFrame = false
         dimCheckStartedAt = now
         cameraStartedAt = now
         firstResultAt = nil
@@ -1173,7 +1155,6 @@ final class MonitorCoordinator {
         guard !cameraGated else { return }
         monitor.stop()
         cameraGated = true
-        dimCheckSawUsableFrame = false
         dimCheckStartedAt = nil
         nextDimCheckAt = Uptime.now + Settings.dimmedCheckInterval
         dimTimer.schedule(at: nextDimCheckAt)
