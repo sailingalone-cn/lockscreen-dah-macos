@@ -93,3 +93,23 @@
 - 首次冷启动一次 3 s 无帧 → `cameraUnavailable`，30 s 重试自愈（既有抖动，浸泡未复现）。
 - 浸泡（34.5 min，灭屏 17m55s / 180 脉冲，设置 5 s、你已确认保留）：灭屏 1.59%、在座 0.28%、整段 0.96%；无 stall / 误重建 / panic；WindowServer 0.8–7.6%。10 s 配置按此前实测约 0.92%。
 - 遗留：`.app` 被拒占锁未修；系统级 TCC 弹窗仍关死（其它 app 受影响）；清理/git 待拍板。
+
+## 2026-11-25 20:15 追加：占锁退出 / 登录自启 / 默认值规范化 / 背光
+
+- **`.app` 被拒占锁（已修）**：`showCameraDeniedAlert` 弹完提示后 `NSApp.terminate(nil)`，不再带着单实例锁停在弹窗上；`.command` 仍可启动。
+- **登录自启（已启用并注册）**：`openAtLoginEnabled=1`，启动时 `SMAppService.mainApp.register()` 成功（日志 `login item registered`；`sfltool dumpbtm` 可见 `Lockscreen Dah` / `file:///Applications/Lockscreen%20Dah.app/`）。实际登录启动尚未验证。
+- **defaults 规范化（已修）**：启动时 `Settings.normalizeStoredValues()` 把被钳制的值写回。实测 `dimmedCheckDuration` 从存储 0.5 变为 **1.5**；`dimmedCheckInterval=5` 保持。新增 4 个测试，全套 **150 个测试通过**。
+- **背光（新功能）**：`DisplayBrightness.swift` 通过私有 `DisplayServices` 把内屏背光置 0；进入灭屏时保存亮度并关背光，退罩/暂停/锁屏/相机故障/录入/退出时恢复；崩溃或 `kill -9` 用 UserDefaults 标记 + 下次启动恢复（若用户已手动调亮则不覆盖）。探针已验证 `Get/Set`；**已实测**：20:21:05 关背光、20:22:59 恢复（亮度回到 0.8125）。
+- **`build.sh --install` 全流程（已复测）**：构建 17.9 s → 安装 → grant（already granted）→ `open`；新 pid 79988，`auth=3`，`watching`。
+- **清理**：删除两个旧 TCC 备份与旧版 `.app` 备份；`/tmp` 采样已归档到 `cpu-probe/sessions/` 后删除；保留最新 TCC 备份 `TCC.db.bak.20261125-192625`。
+- **git**：3 个提交（`693ef91` 源码/测试、`5ed3240` 构建/TCC、`ec736d6` 文档），工作区干净，未 push。
+- **唤醒实测**：开流→亮屏 **0.70 s**（首分析 0.48 s + 匹配）；回座等待受灭屏检查间隔限制（5 s：平均 ~3.2 s、最坏 ~5.7 s）。待定 3 s / 5 s。
+- **未做/待验证**：实际登录自启；`.app` 被拒退出路径未实测（需清 TCC 记录，未做）。
+
+## 2026-11-25 20:50 追加：灭屏检查跑满 / 3 秒间隔 / 身体建立 presence / IR 图标
+
+- **F1（灭屏检查跑满）**：不再「有效帧提前关」，每次跑满 `dimmedCheckDuration`（1.5 s）或直到脸/身体；间隔 3 s。实测：开流 1.50 s、关→开 3.00 s；一次 `bodies=1` 在 0.79 s 撤罩（reason=body），不碰键盘也能唤醒。
+- **F1.1（身体建立 presence）**：presence-only 模式下 `bodyCount>0` 可以**建立**存在链（原来只能维持）；避免「坐着、脸不在画面里 → 先灭屏，再被身体唤醒」。`PresenceTracker.observe(_:now:presenceOnly:)` + `MonitorCoordinator` 传入 `recognizer.isPresenceOnly`；新增 2 测试，全套 **151 通过**。
+- **IR 图标**：新做 1024×1024 深蓝底 + 白色“IR” + 青色镜头环/LED 点；生成 `Resources/Icon.icns`（全尺寸 iconset），`CFBundleIconFile=Icon`，`build.sh` 复制 icns。Finder 中应用图标显示“IR”。
+- **实测**：20:50 启动 pid 96528，auth=3；快检在 1.0–1.5 s 内 `faces=1`，保持 watching，不再误灭屏。
+- **注意**：慢启动时脸可能 1.5–1.7 s 才出现；若仍偶发漏检，可把「灭屏检查时长」从 1.5 s 提到 2 s（菜单项，热生效）——先观察。
