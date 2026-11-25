@@ -113,3 +113,12 @@
 - **IR 图标**：新做 1024×1024 深蓝底 + 白色“IR” + 青色镜头环/LED 点；生成 `Resources/Icon.icns`（全尺寸 iconset），`CFBundleIconFile=Icon`，`build.sh` 复制 icns。Finder 中应用图标显示“IR”。
 - **实测**：20:50 启动 pid 96528，auth=3；快检在 1.0–1.5 s 内 `faces=1`，保持 watching，不再误灭屏。
 - **注意**：慢启动时脸可能 1.5–1.7 s 才出现；若仍偶发漏检，可把「灭屏检查时长」从 1.5 s 提到 2 s（菜单项，热生效）——先观察。
+
+## 2026-11-25 21:14 追加：C2/C3/C4 + 完整安装包
+
+- **C2 身体建立 presence 加固**：presence-only 下需**连续 2 帧** `bodyCount>0` 才建立存在链（单帧可能是误报）；维护仍单帧。测试覆盖 1 帧不建立、2 帧建立、中间空帧重置。
+- **C3 冷启动帧缺口**：首个分析结果之前，帧缺口改用 `startupAllowance`（15 s）判定，不再用 3 s 稳态门槛。修复 19:27「一帧后静默 3 s → cameraUnavailable」的误判；仍保留 15 s 上限。测试覆盖。
+- **C4 菜单栏 IR 图标**：watching/alerting/locked 用代码绘制的 “IR” template monogram；paused/cameraUnavailable/enrolling/dimmed 保留原 SF Symbols。截图确认菜单栏显示 IR。
+- 全套 **154 个测试通过**；当前 pid **8916**，auth=3。
+- **完整安装包**：`/Volumes/DATA/LockscreenDah-1.5.0-20261125.dmg`（698 KB，sha256 `7d6910b9…59204`），含 app、`安装.command`、`启动 Lockscreen Dah.command`、`scripts/grant-camera-tcc.sh`、`README-安装说明.md`。
+- **推送待办**：SSH 身份为 `sailingalone-cn`，但未找到公开的 `lockscreen-dah-macos` fork；需 fork URL 后再推。
