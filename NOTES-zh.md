@@ -123,3 +123,9 @@
 - **完整安装包**：`/Volumes/DATA/LockscreenDah-1.5.0-20261125.dmg`（698 KB，sha256 `7d6910b9…59204`），含 app、`安装.command`、`启动 Lockscreen Dah.command`、`scripts/grant-camera-tcc.sh`、`README-安装说明.md`。
 - **推送待办**：SSH 身份为 `sailingalone-cn`，但未找到公开的 `lockscreen-dah-macos` fork；需 fork URL 后再推。
 - **推送**：已推到 `sailingalone-cn/lockscreen-dah-macos` 的 `main`（`562e84a`）。首次 push 遇到远端 `index-pack` 临时错误，重试即成功；本地 `git fsck --full` 干净。
+
+## 2026-11-25 22:11 上传 GitHub Release
+
+- Release：`v1.5.0-x1e-20261125`（tag 指向 `81feb3d`），资产 `LockscreenDah-1.5.0-20261125.dmg`（714,328 B）。
+- GitHub digest 与本地 sha256 一致：`7d6910b9…59204`；重新下载资产复核一致。
+- URL：https://github.com/sailingalone-cn/lockscreen-dah-macos/releases/tag/v1.5.0-x1e-20261125
